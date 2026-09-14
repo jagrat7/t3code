@@ -53,6 +53,10 @@ const emitOverlappingXAiPromptCompleteOutOfOrder =
 const failPrompt = process.env.T3_ACP_FAIL_PROMPT === "1";
 const failSetConfigOption = process.env.T3_ACP_FAIL_SET_CONFIG_OPTION === "1";
 const exitOnSetConfigOption = process.env.T3_ACP_EXIT_ON_SET_CONFIG_OPTION === "1";
+const imageCapability = process.env.T3_ACP_IMAGE_CAPABILITY === "1";
+const advertisedModelIds = process.env.T3_ACP_MODEL_IDS?.split(",")
+  .map((value) => value.trim())
+  .filter((value) => value.length > 0);
 const promptResponseText = process.env.T3_ACP_PROMPT_RESPONSE_TEXT;
 const initialGrokReasoningEffort =
   process.env.T3_ACP_INITIAL_GROK_REASONING_EFFORT?.trim() || undefined;
@@ -67,9 +71,12 @@ const permissionRequestCount = Math.max(
   1,
   Number(process.env.T3_ACP_PERMISSION_REQUEST_COUNT ?? "1") || 1,
 );
+const advertisedModeIds = process.env.T3_ACP_MODE_IDS?.split(",")
+  .map((value) => value.trim())
+  .filter((value) => value.length > 0);
 const sessionId = "mock-session-1";
 
-let currentModeId = antigravityProfile ? "default" : "ask";
+let currentModeId = advertisedModeIds?.[0] ?? (antigravityProfile ? "default" : "ask");
 let currentModelId = antigravityProfile ? "gemini-test-low" : "default";
 let parameterizedModelPicker = false;
 let currentReasoning = "medium";
@@ -256,12 +263,14 @@ function configOptions(): ReadonlyArray<AcpSchema.SessionConfigOption> {
       category: "model",
       type: "select" as const,
       currentValue: currentModelId,
-      options: [
-        { value: "default", name: "Auto" },
-        { value: "composer-2", name: "Composer 2" },
-        { value: "composer-2[fast=true]", name: "Composer 2 Fast" },
-        { value: "gpt-5.3-codex[reasoning=medium,fast=false]", name: "Codex 5.3" },
-      ],
+      options: advertisedModelIds
+        ? advertisedModelIds.map((id) => ({ value: id, name: id }))
+        : [
+            { value: "default", name: "Auto" },
+            { value: "composer-2", name: "Composer 2" },
+            { value: "composer-2[fast=true]", name: "Composer 2 Fast" },
+            { value: "gpt-5.3-codex[reasoning=medium,fast=false]", name: "Codex 5.3" },
+          ],
     },
   ];
 }
@@ -300,7 +309,7 @@ const antigravityModels = [
   { modelId: "gemini-test-high", name: "Gemini Test High" },
 ] satisfies ReadonlyArray<AcpSchema.ModelInfo>;
 
-const availableModes: ReadonlyArray<AcpSchema.SessionMode> = antigravityProfile
+const defaultAvailableModes: ReadonlyArray<AcpSchema.SessionMode> = antigravityProfile
   ? [
       { id: "default", name: "Default" },
       { id: "auto_edit", name: "Auto edit" },
@@ -323,6 +332,12 @@ const availableModes: ReadonlyArray<AcpSchema.SessionMode> = antigravityProfile
         description: "Write and modify code with full tool access",
       },
     ];
+const availableModes: ReadonlyArray<AcpSchema.SessionMode> = advertisedModeIds
+  ? advertisedModeIds.map((id) => ({
+      id,
+      name: defaultAvailableModes.find((mode) => mode.id === id)?.name ?? id,
+    }))
+  : defaultAvailableModes;
 
 function modeState(): AcpSchema.SessionModeState {
   return {
@@ -408,7 +423,13 @@ const program = Effect.gen(function* () {
       }
       return {
         protocolVersion: 1,
-        agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {} } },
+        agentCapabilities: {
+          loadSession: true,
+          sessionCapabilities: { resume: {} },
+          ...(imageCapability
+            ? { promptCapabilities: { image: true, embeddedContext: true } }
+            : {}),
+        },
         // Grok advertises model state before any session exists; the provider
         // health check reads it from here without authenticating.
         _meta: { modelState: modelState() },
