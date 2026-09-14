@@ -1042,6 +1042,9 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           cursor: {
             enabled: false,
           },
+          devin: {
+            enabled: false,
+          },
           grok: {
             enabled: false,
           },
