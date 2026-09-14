@@ -110,6 +110,9 @@ describe("buildInitialDevinProviderSnapshot", () => {
       expect(snapshot.status).toBe("disabled");
       expect(snapshot.installed).toBe(false);
       expect(snapshot.message).toContain("disabled");
+      // Devin cannot rewind a native session — clients must not offer it
+      // even while the provider is disabled.
+      expect(snapshot.supportsConversationRollback).toBe(false);
     }),
   );
 
@@ -275,6 +278,7 @@ it.layer(NodeServices.layer)("checkDevinProviderStatus", (it) => {
         "adaptive",
       ]);
       expect(snapshot.slashCommands.map((command) => command.name)).toEqual(["compact"]);
+      expect(snapshot.supportsConversationRollback).toBe(false);
     }),
   );
 

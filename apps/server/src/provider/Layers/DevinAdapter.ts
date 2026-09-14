@@ -5,7 +5,9 @@
  * model selections are applied through `session/set_config_option` at
  * start and on each turn. Image attachments are sent as ACP image parts
  * when the CLI advertises `promptCapabilities.image`; generic files
- * reach Devin through the path line ProviderService puts in the prompt.
+ * reach Devin through the path line ProviderService puts in the prompt,
+ * which resolves inside the attachment store declared to `devin acp` as
+ * an additional workspace directory.
  * `devin acp` exposes no per-spawn permission flags, so T3
  * runtime modes map onto Devin's session modes through the negotiated
  * `mode` config option and `session/request_permission` forwarding.
@@ -51,6 +53,7 @@ import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
+  ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
@@ -136,6 +139,9 @@ interface DevinSessionContext {
    * continues it, and only the last remaining prompt settles the turn. */
   promptsInFlight: number;
   readonly supportsImages: boolean;
+  /** Set when the ACP transport dies on its own; the stop settles the
+   * session as an error exit rather than a graceful one. */
+  disconnectReason: string | undefined;
   stopped: boolean;
 }
 
@@ -342,6 +348,9 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
       options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
     const makeAcpNativeLoggers = yield* makeAcpNativeLoggerFactory();
 
+    // Owns fibers that must outlive an individual session scope — e.g. the
+    // disconnect settlement, which closes the session scope it runs from.
+    const adapterScope = yield* Scope.Scope;
     const sessions = new Map<ThreadId, DevinSessionContext>();
     const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
     const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
@@ -466,10 +475,45 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
       return Effect.succeed(ctx);
     };
 
+    // Single-owner turn settlement: emits `turn.completed` at most once for
+    // a bound turn, and always while holding the thread lock so a session
+    // stop cannot interleave `session.exited` between the ownership claim
+    // and the event.
+    const finishTurn = (
+      ctx: DevinSessionContext,
+      turnId: TurnId,
+      payload: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>["payload"],
+    ) =>
+      withThreadLock(
+        ctx.threadId,
+        Effect.gen(function* () {
+          if (ctx.activeTurnId !== turnId) return;
+          ctx.activeTurnId = undefined;
+          ctx.session = {
+            ...ctx.session,
+            activeTurnId: undefined,
+            updatedAt: yield* nowIso,
+          };
+          yield* offerRuntimeEvent({
+            type: "turn.completed",
+            ...(yield* makeEventStamp()),
+            provider: PROVIDER,
+            threadId: ctx.threadId,
+            turnId,
+            payload,
+          });
+        }),
+      );
+
+    // Callers must hold `withThreadLock(ctx.threadId)`: the turn claim and
+    // the terminal events below are the stop side of the settlement race
+    // described on finishTurn.
     const stopSessionInternal = (ctx: DevinSessionContext) =>
       Effect.gen(function* () {
         if (ctx.stopped) return;
         ctx.stopped = true;
+        const unsettledTurnId = ctx.activeTurnId;
+        ctx.activeTurnId = undefined;
         yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
         yield* settlePendingUserInputsAsEmptyAnswers(ctx.pendingUserInputs);
         if (ctx.notificationFiber) {
@@ -477,12 +521,35 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
         }
         yield* Effect.ignore(Scope.close(ctx.scope, Exit.void));
         sessions.delete(ctx.threadId);
+        const disconnectReason = ctx.disconnectReason;
+        ctx.session = {
+          ...ctx.session,
+          status: "closed",
+          activeTurnId: undefined,
+          updatedAt: yield* nowIso,
+        };
+        if (unsettledTurnId !== undefined) {
+          yield* offerRuntimeEvent({
+            type: "turn.completed",
+            ...(yield* makeEventStamp()),
+            provider: PROVIDER,
+            threadId: ctx.threadId,
+            turnId: unsettledTurnId,
+            payload:
+              disconnectReason !== undefined
+                ? { state: "failed", errorMessage: disconnectReason }
+                : { state: "cancelled", stopReason: "cancelled" },
+          });
+        }
         yield* offerRuntimeEvent({
           type: "session.exited",
           ...(yield* makeEventStamp()),
           provider: PROVIDER,
           threadId: ctx.threadId,
-          payload: { exitKind: "graceful" },
+          payload:
+            disconnectReason !== undefined
+              ? { exitKind: "error" as const, reason: disconnectReason }
+              : { exitKind: "graceful" as const },
         });
       });
 
@@ -536,6 +603,11 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             ...(options?.environment !== undefined ? { environment: options.environment } : {}),
             childProcessSpawner,
             cwd,
+            // The attachment store lives outside the project cwd. Declaring
+            // it as a workspace root keeps the ProviderService path line
+            // dereferenceable in Devin modes that restrict filesystem
+            // access outside the workspace (same as Antigravity).
+            additionalDirectories: [serverConfig.attachmentsDir],
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "t3-code", version: "0.0.0" },
             ...acpNativeLoggers,
@@ -680,6 +752,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             promptsInFlight: 0,
             supportsImages:
               started.initializeResult.agentCapabilities?.promptCapabilities?.image === true,
+            disconnectReason: undefined,
             stopped: false,
           };
 
@@ -690,7 +763,23 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                   case "EventStreamBarrier":
                     yield* Deferred.succeed(event.acknowledge, undefined);
                     return;
+                }
+                // Drop agent events that arrive after the transport died or
+                // the session was stopped.
+                if (ctx.stopped || ctx.disconnectReason !== undefined) return;
+                switch (event._tag) {
                   case "ModeChanged":
+                    return;
+                  case "ConnectionTerminated":
+                    // Set before the fork so `startSession`'s post-drain
+                    // check sees the terminal state deterministically. The
+                    // forked stop takes the thread lock like every other
+                    // settlement path.
+                    ctx.disconnectReason ??=
+                      event.error.message || "Devin ACP connection terminated.";
+                    yield* withThreadLock(ctx.threadId, stopSessionInternal(ctx)).pipe(
+                      Effect.forkIn(adapterScope),
+                    );
                     return;
                   case "AssistantItemStarted":
                     yield* offerRuntimeEvent(
@@ -807,6 +896,21 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             payload: { providerThreadId: started.sessionId },
           });
 
+          // The agent can die between `session/new` and now (e.g. an
+          // immediate crash after handshake). Drain queued notifications so
+          // a pending ConnectionTerminated is applied, then fail the start
+          // instead of reporting a healthy session.
+          yield* acp.drainEvents;
+          if (ctx.stopped || ctx.disconnectReason !== undefined) {
+            return yield* new ProviderAdapterSessionClosedError({
+              provider: PROVIDER,
+              threadId: input.threadId,
+              cause: new Error(
+                ctx.disconnectReason ?? "Devin ACP connection terminated during session startup.",
+              ),
+            });
+          }
+
           return session;
         }).pipe(Effect.scoped),
       );
@@ -834,6 +938,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
           }),
         );
         const turnId = TurnId.make(yield* randomUUIDv4);
+        let turnStarted = false;
 
         return yield* Effect.gen(function* () {
           const turnModelSelection =
@@ -854,23 +959,38 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 detail: `Devin does not advertise a session mode that can honor '${runtimeMode}'.`,
               }),
           });
-          ctx.activeTurnId = turnId;
-          ctx.lastPlanFingerprint = undefined;
-          ctx.session = {
-            ...ctx.session,
-            ...(model !== undefined ? { model } : {}),
-            activeTurnId: turnId,
-            updatedAt: yield* nowIso,
-          };
-
-          yield* offerRuntimeEvent({
-            type: "turn.started",
-            ...(yield* makeEventStamp()),
-            provider: PROVIDER,
-            threadId: input.threadId,
-            turnId,
-            payload: model !== undefined ? { model } : {},
-          });
+          // Bind the turn and emit `turn.started` under the thread lock so a
+          // concurrent session stop either settles this turn after it is
+          // visible, or rejects the start outright — never `turn.started`
+          // after `session.exited` or a completed-without-started pair.
+          yield* withThreadLock(
+            input.threadId,
+            Effect.gen(function* () {
+              if (ctx.stopped) {
+                return yield* new ProviderAdapterSessionClosedError({
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                });
+              }
+              ctx.activeTurnId = turnId;
+              ctx.lastPlanFingerprint = undefined;
+              ctx.session = {
+                ...ctx.session,
+                ...(model !== undefined ? { model } : {}),
+                activeTurnId: turnId,
+                updatedAt: yield* nowIso,
+              };
+              yield* offerRuntimeEvent({
+                type: "turn.started",
+                ...(yield* makeEventStamp()),
+                provider: PROVIDER,
+                threadId: input.threadId,
+                turnId,
+                payload: model !== undefined ? { model } : {},
+              });
+              turnStarted = true;
+            }),
+          );
 
           const promptParts: Array<EffectAcpSchema.ContentBlock> = [];
           const imageAttachments = (input.attachments ?? []).filter(
@@ -952,24 +1072,11 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
           } else {
             ctx.turns.push({ id: turnId, items: [{ prompt: promptParts, result }] });
           }
-          ctx.activeTurnId = undefined;
-          ctx.session = {
-            ...ctx.session,
-            activeTurnId: undefined,
-            updatedAt: yield* nowIso,
-          };
 
           if (ctx.promptsInFlight === 1) {
-            yield* offerRuntimeEvent({
-              type: "turn.completed",
-              ...(yield* makeEventStamp()),
-              provider: PROVIDER,
-              threadId: input.threadId,
-              turnId,
-              payload: {
-                state: result.stopReason === "cancelled" ? "cancelled" : "completed",
-                stopReason: result.stopReason ?? null,
-              },
+            yield* finishTurn(ctx, turnId, {
+              state: result.stopReason === "cancelled" ? "cancelled" : "completed",
+              stopReason: result.stopReason ?? null,
             });
           }
 
@@ -979,6 +1086,28 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             resumeCursor: ctx.session.resumeCursor,
           };
         }).pipe(
+          // A `turn.started` event was already emitted once the turn id was
+          // bound, so any later failure (including the transport dying
+          // mid-prompt) must settle the turn unless the session stop already
+          // claimed it.
+          Effect.tapError((cause) =>
+            !turnStarted
+              ? Effect.void
+              : finishTurn(ctx, turnId, { state: "failed", errorMessage: cause.message }),
+          ),
+          Effect.onInterrupt(() =>
+            !turnStarted
+              ? Effect.void
+              : Effect.gen(function* () {
+                  yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
+                  yield* settlePendingUserInputsAsEmptyAnswers(ctx.pendingUserInputs);
+                  yield* Effect.ignore(ctx.acp.cancel);
+                  yield* finishTurn(ctx, turnId, {
+                    state: "cancelled",
+                    stopReason: "cancelled",
+                  });
+                }),
+          ),
           Effect.ensuring(
             Effect.sync(() => {
               ctx.promptsInFlight = Math.max(0, ctx.promptsInFlight - 1);
@@ -1048,22 +1177,19 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
       });
 
     const rollbackThread: ProviderAdapterShape<ProviderAdapterError>["rollbackThread"] = (
-      threadId,
-      numTurns,
+      _threadId,
+      _numTurns,
     ) =>
-      Effect.gen(function* () {
-        const ctx = yield* requireSession(threadId);
-        if (!Number.isInteger(numTurns) || numTurns < 1) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
-            operation: "rollbackThread",
-            issue: "numTurns must be an integer >= 1.",
-          });
-        }
-        const nextLength = Math.max(0, ctx.turns.length - numTurns);
-        ctx.turns.splice(nextLength);
-        return { threadId, turns: ctx.turns };
-      });
+      // Devin cannot rewind its native session, so trimming only the
+      // adapter's in-memory turn list would desync the transcript from the
+      // agent's history.
+      Effect.fail(
+        new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "rollbackThread",
+          issue: "Devin does not support conversation rewind. Start a new thread instead.",
+        }),
+      );
 
     const stopSession: ProviderAdapterShape<ProviderAdapterError>["stopSession"] = (threadId) =>
       withThreadLock(
@@ -1084,10 +1210,18 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
       });
 
     const stopAll: ProviderAdapterShape<ProviderAdapterError>["stopAll"] = () =>
-      Effect.forEach(sessions.values(), stopSessionInternal, { discard: true });
+      Effect.forEach(
+        sessions.values(),
+        (ctx) => withThreadLock(ctx.threadId, stopSessionInternal(ctx)),
+        { discard: true },
+      );
 
     yield* Effect.addFinalizer(() =>
-      Effect.forEach(sessions.values(), stopSessionInternal, { discard: true }).pipe(
+      Effect.forEach(
+        sessions.values(),
+        (ctx) => withThreadLock(ctx.threadId, stopSessionInternal(ctx)),
+        { discard: true },
+      ).pipe(
         Effect.catch((cause) =>
           Effect.logError("Failed to emit Devin session shutdown event.", { cause }),
         ),
@@ -1100,7 +1234,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: { sessionModelSwitch: "in-session", supportsConversationRollback: false },
       compaction: { type: "slash-command", command: "/compact" },
       startSession,
       sendTurn,

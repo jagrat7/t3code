@@ -9,7 +9,7 @@ import * as RpcClient from "effect/unstable/rpc/RpcClient";
 import * as RpcMessage from "effect/unstable/rpc/RpcMessage";
 import * as RpcServer from "effect/unstable/rpc/RpcServer";
 
-import * as AcpSchema from "./_generated/schema.gen.ts";
+import * as AcpSchema from "./schema.ts";
 import { AGENT_METHODS, CLIENT_METHODS } from "./_generated/meta.gen.ts";
 import * as AcpError from "./errors.ts";
 import * as AcpProtocol from "./protocol.ts";

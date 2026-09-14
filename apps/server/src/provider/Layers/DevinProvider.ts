@@ -48,6 +48,15 @@ const VERSION_PROBE_TIMEOUT_MS = 4_000;
 // `initialize` is a single local round trip, so this is generous even on slow machines.
 const DEVIN_ACP_INITIALIZE_TIMEOUT_MS = 8_000;
 
+// Devin cannot rewind a native session, so no draft may advertise
+// conversation rollback regardless of probe outcome.
+const buildDevinProviderDraft = (
+  input: Parameters<typeof buildServerProvider>[0],
+): ServerProviderDraft => ({
+  ...buildServerProvider(input),
+  supportsConversationRollback: false,
+});
+
 export function buildInitialDevinProviderSnapshot(
   devinSettings: DevinSettings,
 ): Effect.Effect<ServerProviderDraft> {
@@ -55,7 +64,7 @@ export function buildInitialDevinProviderSnapshot(
     const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
 
     if (!devinSettings.enabled) {
-      return buildServerProvider({
+      return buildDevinProviderDraft({
         presentation: DEVIN_PRESENTATION,
         enabled: false,
         checkedAt,
@@ -70,7 +79,7 @@ export function buildInitialDevinProviderSnapshot(
       });
     }
 
-    return buildServerProvider({
+    return buildDevinProviderDraft({
       presentation: DEVIN_PRESENTATION,
       enabled: true,
       checkedAt,
@@ -197,7 +206,7 @@ export const checkDevinProviderStatus = Effect.fn("checkDevinProviderStatus")(fu
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
 
   if (!devinSettings.enabled) {
-    return buildServerProvider({
+    return buildDevinProviderDraft({
       presentation: DEVIN_PRESENTATION,
       enabled: false,
       checkedAt,
@@ -222,7 +231,7 @@ export const checkDevinProviderStatus = Effect.fn("checkDevinProviderStatus")(fu
     yield* Effect.logWarning("Devin CLI health check failed.", {
       errorTag: error._tag,
     });
-    return buildServerProvider({
+    return buildDevinProviderDraft({
       presentation: DEVIN_PRESENTATION,
       enabled: devinSettings.enabled,
       checkedAt,
@@ -240,7 +249,7 @@ export const checkDevinProviderStatus = Effect.fn("checkDevinProviderStatus")(fu
   }
 
   if (Option.isNone(versionResult.success)) {
-    return buildServerProvider({
+    return buildDevinProviderDraft({
       presentation: DEVIN_PRESENTATION,
       enabled: devinSettings.enabled,
       checkedAt,
@@ -263,7 +272,7 @@ export const checkDevinProviderStatus = Effect.fn("checkDevinProviderStatus")(fu
       stdoutLength: versionOutput.stdout.length,
       stderrLength: versionOutput.stderr.length,
     });
-    return buildServerProvider({
+    return buildDevinProviderDraft({
       presentation: DEVIN_PRESENTATION,
       enabled: devinSettings.enabled,
       checkedAt,
@@ -299,7 +308,7 @@ export const checkDevinProviderStatus = Effect.fn("checkDevinProviderStatus")(fu
         : { status: "unknown" };
 
   if (auth.status === "unauthenticated") {
-    return buildServerProvider({
+    return buildDevinProviderDraft({
       presentation: DEVIN_PRESENTATION,
       enabled: devinSettings.enabled,
       checkedAt,
@@ -325,7 +334,7 @@ export const checkDevinProviderStatus = Effect.fn("checkDevinProviderStatus")(fu
     yield* Effect.logWarning("Devin ACP initialize probe failed or timed out.", {
       errorTag: Exit.isFailure(acpExit) ? causeErrorTag(acpExit.cause) : "Timeout",
     });
-    return buildServerProvider({
+    return buildDevinProviderDraft({
       presentation: DEVIN_PRESENTATION,
       enabled: devinSettings.enabled,
       checkedAt,
@@ -366,7 +375,7 @@ export const checkDevinProviderStatus = Effect.fn("checkDevinProviderStatus")(fu
     });
   }
 
-  return buildServerProvider({
+  return buildDevinProviderDraft({
     presentation: DEVIN_PRESENTATION,
     enabled: devinSettings.enabled,
     checkedAt,

@@ -1615,4 +1615,224 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
       yield* adapter.stopSession(threadId);
     }),
   );
+
+  it.effect("does not offer conversation rollback Devin cannot honor", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("devin-no-rollback");
+
+      const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+
+      assert.equal(adapter.capabilities.supportsConversationRollback, false);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "remember this", attachments: [] });
+
+      const error = yield* adapter.rollbackThread(threadId, 1).pipe(Effect.flip);
+      assert.equal(error._tag, "ProviderAdapterValidationError");
+
+      // The transcript must stay whole: trimming only the adapter's local
+      // turn list would desync it from Devin's native session history.
+      const thread = yield* adapter.readThread(threadId);
+      assert.equal(thread.turns.length, 1);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("settles a mid-turn disconnect as a failed turn and an error exit", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("devin-mid-turn-disconnect");
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_EXIT_ON_PROMPT: "1" }),
+      );
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.type === "session.exited"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const sendTurnExit = yield* adapter
+        .sendTurn({ threadId, input: "die on this prompt", attachments: [] })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(sendTurnExit));
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const completed = events.filter((event) => event.type === "turn.completed");
+      // Exactly one settlement — sendTurn's error path and the disconnect
+      // stop must not both complete the same turn.
+      assert.equal(completed.length, 1);
+      if (completed[0]?.type === "turn.completed") {
+        assert.equal(completed[0].payload.state, "failed");
+      }
+      const exited = events.find((event) => event.type === "session.exited");
+      assert.isDefined(exited);
+      if (exited?.type === "session.exited") {
+        assert.equal(exited.payload.exitKind, "error");
+        assert.isString(exited.payload.reason);
+      }
+      // Terminal order is fixed: the turn settles before the session exits.
+      assert.isBelow(
+        events.findIndex((event) => event.type === "turn.completed"),
+        events.findIndex((event) => event.type === "session.exited"),
+      );
+
+      assert.equal(yield* adapter.hasSession(threadId), false);
+    }),
+  );
+
+  it.effect("settles an in-flight turn before session.exited when the session is stopped", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("devin-stop-mid-turn-order");
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_PROMPT_DELAY_MS: "1500" }),
+      );
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.type === "session.exited"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const sendTurnFiber = yield* adapter
+        .sendTurn({ threadId, input: "stop me mid-turn", attachments: [] })
+        .pipe(Effect.forkChild);
+
+      // Wait for the prompt to be genuinely in flight before stopping.
+      yield* Effect.gen(function* () {
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          const sessions = yield* adapter.listSessions();
+          if (sessions.find((entry) => entry.threadId === threadId)?.activeTurnId !== undefined) {
+            return;
+          }
+          yield* TestClock.adjust("10 millis");
+        }
+        throw new Error("Timed out waiting for the prompt to be in flight.");
+      });
+
+      yield* adapter.stopSession(threadId);
+      yield* Fiber.await(sendTurnFiber);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const completed = events.filter((event) => event.type === "turn.completed");
+      assert.equal(completed.length, 1);
+      if (completed[0]?.type === "turn.completed") {
+        assert.equal(completed[0].payload.state, "cancelled");
+      }
+      assert.isBelow(
+        events.findIndex((event) => event.type === "turn.completed"),
+        events.findIndex((event) => event.type === "session.exited"),
+      );
+      assert.equal(yield* adapter.hasSession(threadId), false);
+    }),
+  );
+
+  it.effect("fails startup cleanly when the agent dies during session configuration", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("devin-startup-death");
+
+      const events: ProviderRuntimeEvent[] = [];
+      const eventsFiber = yield* Stream.runForEach(
+        adapter.streamEvents.pipe(Stream.filter((event) => event.threadId === threadId)),
+        (event) => Effect.sync(() => events.push(event)),
+      ).pipe(Effect.forkChild);
+
+      // `auto-accept-edits` resolves to the mock's `code` mode, so startup
+      // issues `session/set_config_option` — where this mock exits.
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_EXIT_ON_SET_CONFIG_OPTION: "1" }),
+      );
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+
+      const error = yield* adapter
+        .startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "auto-accept-edits",
+        })
+        .pipe(Effect.flip);
+      assert.include(
+        [
+          "ProviderAdapterRequestError",
+          "ProviderAdapterProcessError",
+          "ProviderAdapterSessionClosedError",
+        ],
+        error._tag,
+      );
+
+      yield* Effect.yieldNow;
+      yield* Fiber.interrupt(eventsFiber);
+      assert.isFalse(events.some((event) => event.type === "session.started"));
+      assert.equal(yield* adapter.hasSession(threadId), false);
+    }),
+  );
+
+  it.effect("declares the attachment store as a workspace root on session/new", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const serverConfig = yield* ServerConfig;
+      const threadId = ThreadId.make("devin-attachments-root");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-dirs-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const argvLogPath = NodePath.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath),
+      );
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const requests = yield* waitForJsonLogMatch(
+        requestLogPath,
+        (entry) => entry.method === "session/new",
+      );
+      const params = requests.find((entry) => entry.method === "session/new")?.params as
+        | Record<string, unknown>
+        | undefined;
+      assert.deepEqual(params?.additionalDirectories, [serverConfig.attachmentsDir]);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
 });

@@ -53,6 +53,7 @@ const emitOverlappingXAiPromptCompleteOutOfOrder =
 const failPrompt = process.env.T3_ACP_FAIL_PROMPT === "1";
 const failSetConfigOption = process.env.T3_ACP_FAIL_SET_CONFIG_OPTION === "1";
 const exitOnSetConfigOption = process.env.T3_ACP_EXIT_ON_SET_CONFIG_OPTION === "1";
+const exitOnPrompt = process.env.T3_ACP_EXIT_ON_PROMPT === "1";
 const imageCapability = process.env.T3_ACP_IMAGE_CAPABILITY === "1";
 const advertisedModelIds = process.env.T3_ACP_MODEL_IDS?.split(",")
   .map((value) => value.trim())
@@ -640,6 +641,12 @@ const program = Effect.gen(function* () {
     Effect.gen(function* () {
       const requestedSessionId = String(request.sessionId ?? sessionId);
       promptCount += 1;
+
+      if (exitOnPrompt) {
+        // Simulate the agent process dying mid-turn: the prompt RPC never
+        // gets a response and the transport drops.
+        return yield* Effect.sync(() => process.exit(7));
+      }
 
       if (completeFirstPromptOnCancel && promptCount === 1) {
         yield* agent.client.sessionUpdate({
