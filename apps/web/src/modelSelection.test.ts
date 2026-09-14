@@ -84,6 +84,25 @@ describe("instance-scoped model selection", () => {
     );
   });
 
+  it("resolves Devin discovered models without a custom model bucket", () => {
+    const providers = [
+      provider({
+        provider: ProviderDriverKind.make("devin"),
+        instanceId: "devin",
+        models: ["swe-2-high", "swe-2-medium", "adaptive"],
+      }),
+    ];
+    const entry = deriveProviderInstanceEntries(providers)[0]!;
+
+    const options = getAppModelOptionsForInstance(DEFAULT_UNIFIED_SETTINGS, entry);
+    expect(options.map((option) => option.slug)).toEqual([
+      "swe-2-high",
+      "swe-2-medium",
+      "adaptive",
+    ]);
+    expect(options.every((option) => !option.isCustom)).toBe(true);
+  });
+
   it("keeps custom models on the provider instance that declared them", () => {
     const providers = [
       provider({
