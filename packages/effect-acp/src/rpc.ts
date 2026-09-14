@@ -1,7 +1,10 @@
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 
-import * as AcpSchema from "./_generated/schema.gen.ts";
+// `schema.ts` re-exports the generated schema plus hand-maintained
+// extensions (e.g. `additionalDirectories` on session requests) — the RPC
+// group must encode/decode through it or those fields never reach the wire.
+import * as AcpSchema from "./schema.ts";
 import { AGENT_METHODS, CLIENT_METHODS } from "./_generated/meta.gen.ts";
 
 const InitializeRpc = Rpc.make(AGENT_METHODS.initialize, {
