@@ -1,4 +1,8 @@
-import type { ProviderInstanceId } from "@t3tools/contracts";
+import type { ProviderInstanceId, ProviderOptionSelection } from "@t3tools/contracts";
+import {
+  buildExplicitProviderOptionSelectionsFromDescriptors,
+  getProviderOptionDescriptors,
+} from "@t3tools/shared/model";
 import type { ModelEsque } from "./providerIconUtils";
 
 /** One entry per account opens the pairing editor; saved model IDs remain unchanged. */
@@ -36,4 +40,16 @@ export function findFusionLeadPairing(
     (model) => model.fusion?.lead.id === leadId && !model.isUnavailable,
   );
   return candidates.find((model) => model.fusion?.sidekick.id === sidekickId) ?? candidates[0];
+}
+
+/** Carry valid lead traits to a newly selected pairing and drop choices it cannot offer. */
+export function fusionOptionsForModel(
+  model: ModelEsque,
+  selections: ReadonlyArray<ProviderOptionSelection> | null | undefined,
+) {
+  if (!model.capabilities) return undefined;
+  return buildExplicitProviderOptionSelectionsFromDescriptors(
+    getProviderOptionDescriptors({ caps: model.capabilities, selections }),
+    selections,
+  );
 }

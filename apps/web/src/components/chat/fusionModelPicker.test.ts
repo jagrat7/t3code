@@ -1,6 +1,10 @@
 import { ProviderInstanceId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
-import { collapseFusionModels, findFusionLeadPairing } from "./fusionModelPicker";
+import {
+  collapseFusionModels,
+  findFusionLeadPairing,
+  fusionOptionsForModel,
+} from "./fusionModelPicker";
 
 const instanceId = ProviderInstanceId.make("devin-work");
 const otherInstanceId = ProviderInstanceId.make("devin-personal");
@@ -66,5 +70,38 @@ describe("Fusion picker", () => {
         "swe",
       ),
     ).toBeUndefined();
+  });
+
+  it("keeps only traits offered by the newly selected pairing", () => {
+    expect(
+      fusionOptionsForModel(
+        {
+          ...models[1]!,
+          capabilities: {
+            optionDescriptors: [
+              {
+                id: "reasoningEffort",
+                label: "Thinking level",
+                type: "select",
+                currentValue: "medium",
+                options: [
+                  { id: "medium", label: "Medium" },
+                  { id: "high", label: "High" },
+                ],
+              },
+              { id: "fastMode", label: "Fast mode", type: "boolean", currentValue: false },
+            ],
+          },
+        },
+        [
+          { id: "reasoningEffort", value: "high" },
+          { id: "fastMode", value: true },
+          { id: "contextWindow", value: "removed" },
+        ],
+      ),
+    ).toEqual([
+      { id: "reasoningEffort", value: "high" },
+      { id: "fastMode", value: true },
+    ]);
   });
 });

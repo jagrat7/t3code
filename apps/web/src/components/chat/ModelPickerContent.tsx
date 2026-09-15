@@ -3,9 +3,11 @@ import {
   ANTIGRAVITY_DEFAULT_MODEL,
   type ProviderInstanceId,
   type ProviderDriverKind,
+  type ProviderOptionSelection,
   type ResolvedKeybindingsConfig,
 } from "@t3tools/contracts";
 import { resolveSelectableModel } from "@t3tools/shared/model";
+import { getFusionSelectionSummary } from "@t3tools/shared/model";
 import { useAtomValue } from "@effect/atom-react";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { memo, useMemo, useState, useCallback, useEffect, useLayoutEffect, useRef } from "react";
@@ -54,6 +56,7 @@ import { providerModelKey, sortProviderModelItems } from "../../modelOrdering";
 type ModelPickerItem = {
   isFusionGroup?: boolean;
   fusion?: ModelEsque["fusion"];
+  capabilities?: ModelEsque["capabilities"];
   slug: string;
   name: string;
   shortName?: string;
@@ -157,6 +160,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   /** The instance currently selected in the composer (combobox "value"). */
   activeInstanceId: ProviderInstanceId;
   model: string;
+  activeModelOptions?: ReadonlyArray<ProviderOptionSelection> | undefined;
   /**
    * When set, the picker is locked to the given driver kind — typically
    * because the user is editing a previously-sent message and can't change
@@ -184,7 +188,11 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   onRequestClose?: () => void;
   onOpenProviderSetup?: (instanceId: ProviderInstanceId) => void;
   getModelDisabledReason?: (instanceId: ProviderInstanceId, model: string) => string | null;
-  onInstanceModelChange: (instanceId: ProviderInstanceId, model: string) => void;
+  onInstanceModelChange: (
+    instanceId: ProviderInstanceId,
+    model: string,
+    options?: ReadonlyArray<ProviderOptionSelection>,
+  ) => void;
 }) {
   const {
     keybindings: providedKeybindings,
@@ -371,6 +379,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           slug: model.slug,
           name: model.name,
           fusion: model.fusion,
+          capabilities: model.capabilities,
           ...(model.shortName ? { shortName: model.shortName } : {}),
           ...(model.subProvider ? { subProvider: model.subProvider } : {}),
           ...(model.badge ? { badge: model.badge } : {}),
@@ -531,15 +540,11 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     selectedInstanceId,
   ]);
 
-  // Favorites rows keep their exact pairing so each saved lead+sidekick
-  // stays directly selectable; everywhere else pairings collapse to one
-  // Fusion entry per account that opens the pairing editor.
+  // Fusion is one model in every view. The representative keeps the active
+  // pairing so reopening the editor starts from the user's current choices.
   const filteredModels = useMemo(
-    () =>
-      selectedInstanceId === "favorites" && !isSearching
-        ? matchingModels
-        : collapseFusionModels(matchingModels, props.activeInstanceId, activeModelSlug),
-    [matchingModels, props.activeInstanceId, activeModelSlug, selectedInstanceId, isSearching],
+    () => collapseFusionModels(matchingModels, props.activeInstanceId, activeModelSlug),
+    [matchingModels, props.activeInstanceId, activeModelSlug],
   );
 
   const legacySection = useMemo(() => {
@@ -836,12 +841,13 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       <FusionModelPicker
         models={models}
         model={fusionSelection.model}
+        modelOptions={instanceId === props.activeInstanceId ? props.activeModelOptions : undefined}
         providerName={entryByInstanceId.get(instanceId)?.displayName ?? "Devin"}
         onBack={() => {
           setFusionSelection(null);
           window.requestAnimationFrame(focusSearchInput);
         }}
-        onSelect={(model) => onInstanceModelChange(instanceId, model)}
+        onSelect={(model, options) => onInstanceModelChange(instanceId, model, options)}
       />
     );
   }
@@ -1046,11 +1052,27 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                                     <span className="truncate text-xs font-normal leading-snug text-muted-foreground/70" />
                                   }
                                 >
-                                  {model.fusion.lead.name} + {model.fusion.sidekick.name}
+                                  {getFusionSelectionSummary({
+                                    fusion: model.fusion,
+                                    capabilities: model.capabilities,
+                                    selections:
+                                      model.instanceId === props.activeInstanceId &&
+                                      model.slug === activeModelSlug
+                                        ? props.activeModelOptions
+                                        : undefined,
+                                  })}
                                 </TooltipTrigger>
                                 <TooltipPopup>
-                                  {model.instanceDisplayName} · {model.fusion.lead.name} +{" "}
-                                  {model.fusion.sidekick.name}
+                                  {model.instanceDisplayName} ·{" "}
+                                  {getFusionSelectionSummary({
+                                    fusion: model.fusion,
+                                    capabilities: model.capabilities,
+                                    selections:
+                                      model.instanceId === props.activeInstanceId &&
+                                      model.slug === activeModelSlug
+                                        ? props.activeModelOptions
+                                        : undefined,
+                                  })}
                                 </TooltipPopup>
                               </Tooltip>
                             </div>

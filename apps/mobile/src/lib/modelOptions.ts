@@ -7,6 +7,7 @@ import type {
 } from "@t3tools/contracts";
 import {
   buildExplicitProviderOptionSelectionsFromDescriptors,
+  getFusionSelectionSummary,
   getProviderOptionDescriptors,
 } from "@t3tools/shared/model";
 
@@ -63,6 +64,16 @@ function normalizeSelectionOptions(
         instanceId: selection.instanceId,
         model: selection.model,
       };
+}
+
+function modelSubtitle(model: ServerProvider["models"][number], selection: ModelSelection): string {
+  return model.fusion
+    ? getFusionSelectionSummary({
+        fusion: model.fusion,
+        capabilities: model.capabilities,
+        selections: selection.options,
+      })
+    : (model.subProvider ?? "");
 }
 
 /** Explain how to recover a known account-model selection that is unavailable. */
@@ -191,12 +202,17 @@ export function buildModelOptions(
     const providerLabel = providerDisplayLabel(provider);
     for (const model of provider.models) {
       const key = `${provider.instanceId}:${model.slug}`;
+      const selection = normalizeSelectionOptions(
+        {
+          instanceId: provider.instanceId,
+          model: model.slug,
+        },
+        model.capabilities,
+      );
       options.set(key, {
         key,
         label: model.fusion ? "Fusion" : model.name,
-        subtitle: model.fusion
-          ? `${model.fusion.lead.name} + ${model.fusion.sidekick.name}`
-          : (model.subProvider ?? ""),
+        subtitle: modelSubtitle(model, selection),
         fusion: model.fusion,
         providerKey: provider.instanceId,
         providerLabel,
@@ -205,13 +221,7 @@ export function buildModelOptions(
         isLegacy: model.isLegacy === true,
         capabilities: model.capabilities,
         modelPolicy: resolveProviderModelPolicy(provider),
-        selection: normalizeSelectionOptions(
-          {
-            instanceId: provider.instanceId,
-            model: model.slug,
-          },
-          model.capabilities,
-        ),
+        selection,
       });
     }
   }
@@ -228,12 +238,14 @@ export function buildModelOptions(
     const key = `${fallbackModelSelection.instanceId}:${model?.slug ?? fallbackModelSelection.model}`;
     const existing = options.get(key);
     if (existing) {
+      const selection =
+        existing.modelPolicy?.catalogScope === "instance"
+          ? fallbackModelSelection
+          : normalizeSelectionOptions(fallbackModelSelection, existing.capabilities);
       options.set(key, {
         ...existing,
-        selection:
-          existing.modelPolicy?.catalogScope === "instance"
-            ? fallbackModelSelection
-            : normalizeSelectionOptions(fallbackModelSelection, existing.capabilities),
+        ...(model ? { subtitle: modelSubtitle(model, selection) } : {}),
+        selection,
       });
     } else {
       const instanceConfig = config?.settings?.providerInstances[fallbackModelSelection.instanceId];
@@ -247,9 +259,7 @@ export function buildModelOptions(
       options.set(key, {
         key,
         label: model?.fusion ? "Fusion" : (model?.name ?? fallbackModelSelection.model),
-        subtitle: model?.fusion
-          ? `${model.fusion.lead.name} + ${model.fusion.sidekick.name}`
-          : (model?.subProvider ?? ""),
+        subtitle: model ? modelSubtitle(model, fallbackModelSelection) : "",
         fusion: model?.fusion,
         providerKey: fallbackModelSelection.instanceId,
         providerLabel,

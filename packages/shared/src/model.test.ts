@@ -7,6 +7,7 @@ import {
   buildProviderOptionSelectionsFromDescriptors,
   createModelCapabilities,
   createModelSelection,
+  getFusionSelectionSummary,
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
   getProviderOptionDescriptors,
@@ -64,6 +65,22 @@ const claudeCaps: ModelCapabilities = createModelCapabilities({
 });
 
 describe("descriptor helpers", () => {
+  it("summarizes a Fusion pairing and its selected lead options", () => {
+    expect(
+      getFusionSelectionSummary({
+        fusion: {
+          lead: { id: "opus", name: "Claude Opus 5" },
+          sidekick: { id: "swe", name: "SWE-2" },
+        },
+        capabilities: codexCaps,
+        selections: [
+          { id: "reasoningEffort", value: "xhigh" },
+          { id: "fastMode", value: true },
+        ],
+      }),
+    ).toBe("Claude Opus 5 + SWE-2 · Extra High · Fast");
+  });
+
   it("applies selection values to capability descriptors", () => {
     expect(
       getProviderOptionDescriptors({

@@ -33,6 +33,19 @@ const CUSTOM_MODEL_PLACEHOLDER_BY_KIND: Partial<Record<ProviderDriverKind, strin
 /** Above this many models the list gets a filter input. */
 const FILTER_THRESHOLD = 8;
 
+/** Settings manages Fusion as one picker entry, not as its native pairing inventory. */
+export function collapseFusionModelsForSettings(
+  models: ReadonlyArray<ServerProviderModel>,
+): ServerProviderModel[] {
+  let hasFusion = false;
+  return models.flatMap((model) => {
+    if (!model.fusion) return [model];
+    if (hasFusion) return [];
+    hasFusion = true;
+    return [{ ...model, name: "Fusion", shortName: "Fusion" }];
+  });
+}
+
 /**
  * Short capability words shown after a model's slug. Claude and Cursor report
  * fast mode as a boolean `fastMode` option; Codex reports it as a
@@ -182,23 +195,27 @@ export function ProviderModelsSection({
   const scrollToSlugRef = useRef<string | null>(null);
   const hiddenModelSet = useMemo(() => new Set(hiddenModels), [hiddenModels]);
   const favoriteModelSet = useMemo(() => new Set(favoriteModels), [favoriteModels]);
+  const settingsModels = useMemo(() => collapseFusionModelsForSettings(models), [models]);
   const displayModels = useMemo(
     () =>
-      groupModelsForDisplay(models, {
+      groupModelsForDisplay(settingsModels, {
         favoriteModels: favoriteModelSet,
         hiddenModels: hiddenModelSet,
         modelOrder,
       }),
-    [favoriteModelSet, hiddenModelSet, modelOrder, models],
+    [favoriteModelSet, hiddenModelSet, modelOrder, settingsModels],
   );
   const favoriteCount = displayModels.filter((model) => favoriteModelSet.has(model.slug)).length;
   const hiddenCount = displayModels.filter(
     (model) => !model.isCustom && hiddenModelSet.has(model.slug),
   ).length;
-  const builtInModels = useMemo(() => models.filter((model) => !model.isCustom), [models]);
+  const builtInModels = useMemo(
+    () => settingsModels.filter((model) => !model.isCustom),
+    [settingsModels],
+  );
   const allBuiltInModelsHidden =
     builtInModels.length > 0 && builtInModels.every((model) => hiddenModelSet.has(model.slug));
-  const showFilter = models.length > FILTER_THRESHOLD;
+  const showFilter = settingsModels.length > FILTER_THRESHOLD;
   const normalizedFilter = filter.trim().toLowerCase();
   const isFiltering = showFilter && normalizedFilter.length > 0;
   const visibleModels = isFiltering
@@ -526,14 +543,14 @@ export function ProviderModelsSection({
               size="xs"
               variant="ghost-muted"
               onClick={() =>
-                onHiddenModelsChange(nextHiddenModelsForBulkToggle(models, hiddenModels))
+                onHiddenModelsChange(nextHiddenModelsForBulkToggle(settingsModels, hiddenModels))
               }
             >
               {allBuiltInModelsHidden ? "Enable all" : "Disable all"}
             </Button>
           ) : null}
           <span className="text-xs text-muted-foreground">
-            {models.length} model{models.length === 1 ? "" : "s"}
+            {settingsModels.length} model{settingsModels.length === 1 ? "" : "s"}
             {favoriteCount > 0
               ? ` · ${favoriteCount} favorite${favoriteCount === 1 ? "" : "s"}`
               : ""}
