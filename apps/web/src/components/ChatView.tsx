@@ -7465,6 +7465,22 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (!hasSendableContent) {
+      // Enter on an empty composer sends the queue front now — the Zed
+      // gesture: Enter queues the message, Enter again sends it. Held
+      // messages still go since this is an explicit send, and every new
+      // front is sendable the same way.
+      const frontQueuedMessage = queuedMessages[0];
+      if (
+        frontQueuedMessage &&
+        !queuedMessage &&
+        !directAnnotation &&
+        activeThreadKey &&
+        expiredTerminalContextCount === 0 &&
+        !queueBlockedByPendingRequest
+      ) {
+        void onSend(undefined, frontQueuedMessage.submissionIntent, undefined, frontQueuedMessage);
+        return;
+      }
       if (expiredTerminalContextCount > 0) {
         const toastCopy = buildExpiredTerminalContextToastCopy(
           expiredTerminalContextCount,

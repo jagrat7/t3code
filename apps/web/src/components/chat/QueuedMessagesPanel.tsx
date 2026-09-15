@@ -4,6 +4,7 @@ import { useState } from "react";
 import { cn } from "~/lib/utils";
 import type { QueuedComposerMessage } from "../../queuedMessageStore";
 import { Button } from "../ui/button";
+import { Kbd } from "../ui/kbd";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ComposerBanner } from "./ComposerBanner";
 
@@ -14,12 +15,15 @@ import { ComposerBanner } from "./ComposerBanner";
  */
 export function QueuedMessagesPanel({
   messages,
+  showEnterToSendHint,
   onSendNow,
   onEdit,
   onDiscard,
   onClearAll,
 }: {
   messages: ReadonlyArray<QueuedComposerMessage>;
+  /** Enter on the empty composer fast-tracks the front entry — hint it on Send Now. */
+  showEnterToSendHint: boolean;
   onSendNow: (id: string) => void;
   /** Takes the message off the queue and puts its content back in the composer. */
   onEdit: (id: string) => void;
@@ -72,6 +76,7 @@ export function QueuedMessagesPanel({
                 key={message.id}
                 message={message}
                 isNext={index === 0}
+                showEnterToSendHint={index === 0 && showEnterToSendHint}
                 onSendNow={onSendNow}
                 onEdit={onEdit}
                 onDiscard={onDiscard}
@@ -87,12 +92,14 @@ export function QueuedMessagesPanel({
 function QueuedMessageRow({
   message,
   isNext,
+  showEnterToSendHint,
   onSendNow,
   onEdit,
   onDiscard,
 }: {
   message: QueuedComposerMessage;
   isNext: boolean;
+  showEnterToSendHint: boolean;
   onSendNow: (id: string) => void;
   onEdit: (id: string) => void;
   onDiscard: (id: string) => void;
@@ -200,6 +207,9 @@ function QueuedMessageRow({
           onClick={() => onSendNow(message.id)}
         >
           Send Now
+          {showEnterToSendHint ? (
+            <Kbd className="h-4 min-w-4 px-0.5 text-[10px] leading-none">↵</Kbd>
+          ) : null}
         </Button>
       </div>
     </div>

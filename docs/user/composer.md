@@ -33,9 +33,10 @@ See [images and videos](#images-and-videos-in-messages) for previewing and savin
 
 A message sent during a running turn waits in a queue above the composer. It
 goes out on its own when the agent finishes its next tool call, or when the
-turn ends. Expand the queue to send a message right away, move it back into
-the composer to edit, or remove it. Stop returns every queued message to the
-composer.
+turn ends. Press Enter again in the now-empty composer to send the first
+queued message right away. The queue can also send a message now, move it
+back into the composer to edit, or remove it. Stop returns every queued
+message to the composer.
 
 ## Queue messages offline on mobile
 

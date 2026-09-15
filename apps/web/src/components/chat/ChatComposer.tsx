@@ -6154,6 +6154,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           ) : null}
           <QueuedMessagesPanel
             messages={props.queuedMessages}
+            showEnterToSendHint={
+              props.queuedMessages.length > 0 &&
+              !composerSendState.hasSendableContent &&
+              composerSendState.expiredTerminalContextCount === 0
+            }
             onSendNow={props.onSteerQueuedMessage}
             onEdit={props.onEditQueuedMessage}
             onDiscard={props.onDiscardQueuedMessage}
