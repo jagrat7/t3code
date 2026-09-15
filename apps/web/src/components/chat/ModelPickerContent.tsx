@@ -716,6 +716,15 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     modelKeys.splice(legacySection.currentModels.length, 0, legacySection.key);
     return modelKeys;
   }, [legacySection, visibleModels]);
+  // The inline combobox never closes, so Base UI has no open transition to
+  // move the list to the selected model — start the list on its row.
+  const [initialScrollIndex] = useState(() => {
+    if (!activeModelKey) {
+      return undefined;
+    }
+    const index = filteredItemKeys.indexOf(activeModelKey);
+    return index >= 0 ? { index, viewPosition: 0.5 } : undefined;
+  });
   const filteredModelByKey = useMemo(
     (): ReadonlyMap<string, ModelPickerItem> =>
       new Map(
@@ -1140,6 +1149,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                   estimatedItemSize={52}
                   drawDistance={480}
                   recycleItems
+                  {...(initialScrollIndex ? { initialScrollIndex } : {})}
                   contentContainerClassName="pl-2 pr-px"
                   ItemSeparatorComponent={ModelListSeparator}
                   onLayout={updateModelListScrollFades}
