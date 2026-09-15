@@ -549,13 +549,13 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
     }),
   );
 
-  it.effect("rejects a sendTurn while a Devin turn is in flight without reaching ACP", () =>
+  it.effect("steers a sendTurn while a Devin turn is in flight into the active turn", () =>
     Effect.gen(function* () {
       const adapter = yield* DevinAdapter;
       const settings = yield* ServerSettingsService;
-      const threadId = ThreadId.make("devin-no-steer-thread");
+      const threadId = ThreadId.make("devin-steer-thread");
       const tempDir = yield* Effect.promise(() =>
-        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-nosteer-")),
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-steer-")),
       );
       const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
       const argvLogPath = NodePath.join(tempDir, "argv.txt");
@@ -567,6 +567,14 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
         makeProbeWrapper(requestLogPath, argvLogPath, { T3_ACP_PROMPT_DELAY_MS: "1500" }),
       );
       yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.filter((event) => event.type === "turn.started" || event.type === "turn.completed"),
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
 
       yield* adapter.startSession({
         threadId,
@@ -599,29 +607,34 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
         throw new Error("Timed out waiting for the first prompt to be in flight.");
       });
 
-      const rejection = yield* adapter
-        .sendTurn({
-          threadId,
-          input: "actually run 15",
-          attachments: [],
-        })
-        .pipe(Effect.flip);
-      assert.equal(rejection._tag, "ProviderAdapterRequestError");
-
+      const steeredTurn = yield* adapter.sendTurn({
+        threadId,
+        input: "actually run 15",
+        attachments: [],
+      });
       const firstTurn = yield* Fiber.join(firstTurnFiber);
 
+      // Both sendTurns folded into one turn: the steer reuses the active
+      // turn id instead of opening a new one.
+      assert.equal(steeredTurn.turnId, firstTurn.turnId);
+
+      // The steered sendTurn reached ACP as a second session/prompt.
       const requests = yield* waitForJsonLogMatch(
         requestLogPath,
         (entry) => entry.method === "session/prompt",
       );
-      const promptRequests = requests.filter((entry) => entry.method === "session/prompt");
-      // The rejected sendTurn never reached ACP.
-      assert.equal(promptRequests.length, 1);
+      assert.equal(requests.filter((entry) => entry.method === "session/prompt").length, 2);
 
       const sessions = yield* adapter.listSessions();
       const session = sessions.find((entry) => entry.threadId === threadId);
       assert.equal(session?.activeTurnId, undefined);
-      assert.isDefined(firstTurn.turnId);
+
+      const turnEvents = Array.from(yield* Fiber.join(runtimeEventsFiber)).filter(
+        (event) => event.type === "turn.started" || event.type === "turn.completed",
+      );
+      // One merged turn: a single started/completed pair, never two starts.
+      assert.equal(turnEvents.filter((event) => event.type === "turn.started").length, 1);
+      assert.equal(turnEvents.filter((event) => event.type === "turn.completed").length, 1);
 
       yield* adapter.stopSession(threadId);
     }),
@@ -1928,7 +1941,7 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
     }),
   );
 
-  it.effect("rejects a compaction turn while a Devin turn is in flight", () =>
+  it.effect("steers a compaction prompt while a Devin turn is in flight", () =>
     Effect.gen(function* () {
       const adapter = yield* DevinAdapter;
       const settings = yield* ServerSettingsService;
@@ -1967,19 +1980,22 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
         throw new Error("Timed out waiting for the first prompt to be in flight.");
       });
 
-      // ProviderService sends compaction through sendTurn, so the active-turn
-      // admission gate rejects it before it can reach ACP.
-      const rejection = yield* adapter
-        .sendTurn({ threadId, input: "/compact", attachments: [] })
-        .pipe(Effect.flip);
-      assert.equal(rejection._tag, "ProviderAdapterRequestError");
+      // The adapter does not special-case `/compact`: mid-turn prompts steer
+      // like any other, and ProviderCommandReactor owns the "no compaction
+      // while running" guard upstream of sendTurn.
+      const steered = yield* adapter.sendTurn({
+        threadId,
+        input: "/compact",
+        attachments: [],
+      });
+      const firstTurn = yield* Fiber.join(firstTurnFiber);
+      assert.equal(steered.turnId, firstTurn.turnId);
 
-      yield* Fiber.join(firstTurnFiber);
       const requests = yield* waitForJsonLogMatch(
         requestLogPath,
         (entry) => entry.method === "session/prompt",
       );
-      assert.equal(requests.filter((entry) => entry.method === "session/prompt").length, 1);
+      assert.equal(requests.filter((entry) => entry.method === "session/prompt").length, 2);
 
       yield* adapter.stopSession(threadId);
     }),

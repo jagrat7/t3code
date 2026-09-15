@@ -990,26 +990,14 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
     const sendTurn: ProviderAdapterShape<ProviderAdapterError>["sendTurn"] = (input) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(input.threadId);
-        // Devin does not promise safe live steering, so concurrent
-        // `session/prompt` calls are not allowed. The admission check and
-        // the in-flight count share the thread lock, so two racing sendTurns
-        // can never both be admitted; the loser fails fast before anything
-        // reaches ACP. Queued mid-turn messages are a later milestone.
-        yield* withThreadLock(
-          input.threadId,
-          Effect.gen(function* () {
-            if (ctx.promptsInFlight > 0) {
-              return yield* new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "session/prompt",
-                detail:
-                  "Devin is still working on the active turn; wait for it to finish or interrupt it before sending another message.",
-              });
-            }
-            ctx.promptsInFlight += 1;
-          }),
-        );
-        const turnId = TurnId.make(yield* randomUUIDv4);
+        // A sendTurn while a prompt is in flight is a steer: Devin folds
+        // the new prompt into the running turn and resolves every
+        // in-flight `session/prompt` when it ends, so the active turn id
+        // is reused instead of opening a new turn. Counted before any
+        // yield so two racing sendTurns can't both read zero.
+        ctx.promptsInFlight += 1;
+        const freshTurnId = TurnId.make(yield* randomUUIDv4);
+        let turnId = freshTurnId;
         let turnStarted = false;
 
         return yield* Effect.gen(function* () {
@@ -1034,6 +1022,9 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
           // concurrent session stop either settles this turn after it is
           // visible, or rejects the start outright — never `turn.started`
           // after `session.exited` or a completed-without-started pair.
+          // `finishTurn` and `stopSessionInternal` clear `ctx.activeTurnId`
+          // under this same lock, so a set id means a live turn still
+          // accepting folds: steer into it and skip `turn.started`.
           yield* withThreadLock(
             input.threadId,
             Effect.gen(function* () {
@@ -1043,8 +1034,12 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                   threadId: input.threadId,
                 });
               }
+              const steeringTurnId = ctx.activeTurnId;
+              turnId = steeringTurnId ?? turnId;
               ctx.activeTurnId = turnId;
-              ctx.lastPlanFingerprint = undefined;
+              if (steeringTurnId === undefined) {
+                ctx.lastPlanFingerprint = undefined;
+              }
               // `applyModel` resolved the selection to the exact catalog id —
               // that is the model the session is actually running.
               ctx.session = {
@@ -1056,15 +1051,17 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
               if (turnModelSelection) {
                 ctx.modelSelection = turnModelSelection;
               }
-              yield* offerRuntimeEvent({
-                type: "turn.started",
-                ...(yield* makeEventStamp()),
-                provider: PROVIDER,
-                threadId: input.threadId,
-                turnId,
-                payload: appliedModel !== undefined ? { model: appliedModel } : {},
-              });
-              turnStarted = true;
+              if (steeringTurnId === undefined) {
+                yield* offerRuntimeEvent({
+                  type: "turn.started",
+                  ...(yield* makeEventStamp()),
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  turnId,
+                  payload: appliedModel !== undefined ? { model: appliedModel } : {},
+                });
+                turnStarted = true;
+              }
             }),
           );
 
@@ -1183,27 +1180,30 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             resumeCursor: ctx.session.resumeCursor,
           };
         }).pipe(
-          // A `turn.started` event was already emitted once the turn id was
-          // bound, so any later failure (including the transport dying
-          // mid-prompt) must settle the turn unless the session stop already
-          // claimed it.
+          // The last in-flight prompt owns settlement: a bound turn with a
+          // later failure (including the transport dying mid-prompt) must be
+          // completed unless a session stop already claimed it, and a steer
+          // settling as the last prompt covers the owner having already
+          // returned. finishTurn no-ops when this fiber never bound a turn.
           Effect.tapError((cause) =>
-            !turnStarted
-              ? Effect.void
-              : finishTurn(ctx, turnId, { state: "failed", errorMessage: cause.message }),
+            ctx.promptsInFlight === 1
+              ? finishTurn(ctx, turnId, { state: "failed", errorMessage: cause.message })
+              : Effect.void,
           ),
           Effect.onInterrupt(() =>
-            !turnStarted
-              ? Effect.void
-              : Effect.gen(function* () {
-                  yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
-                  yield* settlePendingUserInputsAsEmptyAnswers(ctx.pendingUserInputs);
-                  yield* Effect.ignore(ctx.acp.cancel);
-                  yield* finishTurn(ctx, turnId, {
-                    state: "cancelled",
-                    stopReason: "cancelled",
-                  });
-                }),
+            Effect.gen(function* () {
+              if (turnStarted) {
+                yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
+                yield* settlePendingUserInputsAsEmptyAnswers(ctx.pendingUserInputs);
+                yield* Effect.ignore(ctx.acp.cancel);
+              }
+              if (ctx.promptsInFlight === 1) {
+                yield* finishTurn(ctx, turnId, {
+                  state: "cancelled",
+                  stopReason: "cancelled",
+                });
+              }
+            }),
           ),
           Effect.ensuring(
             Effect.sync(() => {
