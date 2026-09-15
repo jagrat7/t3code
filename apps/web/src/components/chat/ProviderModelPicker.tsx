@@ -13,7 +13,6 @@ import { buttonVariants } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
-import { getFusionSelectionSummary } from "@t3tools/shared/model";
 import { ModelPickerContent, resolveModelPickerSelectedModel } from "./ModelPickerContent";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 import {
@@ -89,22 +88,20 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     (resolveProviderModelPolicy(activeEntry?.snapshot).preserveUnavailableModels
       ? undefined
       : selectedInstanceOptions[0]);
-  const fusionSummary = selectedModel?.fusion
-    ? getFusionSelectionSummary({
-        fusion: selectedModel.fusion,
-        capabilities: selectedModel.capabilities,
-        selections: props.activeModelOptions,
-      })
+  // Traits have their own editable composer controls. Keep this label to the
+  // pairing so values such as reasoning effort do not appear twice.
+  const fusionPairingLabel = selectedModel?.fusion
+    ? `${selectedModel.fusion.lead.name} + ${selectedModel.fusion.sidekick.name}`
     : null;
-  const triggerTitle = fusionSummary
-    ? `Fusion · ${fusionSummary}`
+  const triggerTitle = fusionPairingLabel
+    ? `Fusion · ${fusionPairingLabel}`
     : selectedModel
       ? getTriggerDisplayModelName(selectedModel)
       : props.model === ANTIGRAVITY_DEFAULT_MODEL
         ? "Choose model"
         : props.model || "Choose model";
   const triggerLabel = selectedModel
-    ? `${fusionSummary ? `Fusion · ${fusionSummary}` : getTriggerDisplayModelLabel(selectedModel)}${selectedModel.isUnavailable ? " (Unavailable)" : ""}`
+    ? `${fusionPairingLabel ? `Fusion · ${fusionPairingLabel}` : getTriggerDisplayModelLabel(selectedModel)}${selectedModel.isUnavailable ? " (Unavailable)" : ""}`
     : triggerTitle;
   const showInstanceBadge =
     activeEntry !== null && shouldShowInstanceBadge(activeEntry, props.instanceEntries);
