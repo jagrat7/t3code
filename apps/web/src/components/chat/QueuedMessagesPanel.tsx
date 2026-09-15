@@ -123,9 +123,6 @@ function QueuedMessageRow({
         {text.length > 0 ? (
           <div className="whitespace-pre-wrap break-words text-foreground/90">{text}</div>
         ) : null}
-        {isNext && message.holdUntilUserAction ? (
-          <div className="text-muted-foreground text-xs">Waiting for Send now</div>
-        ) : null}
         {attachmentCount > 0 || contextCount > 0 ? (
           <div className={cn("text-muted-foreground text-xs", text.length > 0 && "mt-0.5")}>
             {[
