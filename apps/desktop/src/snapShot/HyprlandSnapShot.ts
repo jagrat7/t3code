@@ -6,6 +6,11 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as Schema from "effect/Schema";
 import type { DesktopCaptureHelperState } from "@t3tools/contracts";
+import {
+  currentDesktopDistribution,
+  resolveDesktopDistributionIdentity,
+  type DesktopDistribution,
+} from "../app/DesktopDistribution.ts";
 import type { LinuxWindowSnapshot } from "./LinuxSnapShot.ts";
 import { readPortalPng } from "./linuxCaptureSession.ts";
 import { startNativeCaptureFeedback } from "./NativeCaptureFeedback.ts";
@@ -13,9 +18,22 @@ import { HYPRLAND_CAPTURE_ACTION } from "./linuxCaptureSession.ts";
 export { isHyprlandCaptureSession } from "./linuxCaptureSession.ts";
 
 export const HYPRLAND_CAPTURE_EXECUTABLE = "t3-hyprland-snap-shot";
-export type HyprlandCapturePaths = { readonly bundle: string; readonly dataHome: string };
+export type HyprlandCapturePaths = {
+  readonly bundle: string;
+  readonly dataHome: string;
+  readonly distribution?: DesktopDistribution;
+};
 export function hyprlandCaptureExecutable(paths: HyprlandCapturePaths) {
-  return NodePath.join(paths.dataHome, "t3code", "hyprland-capture", HYPRLAND_CAPTURE_EXECUTABLE);
+  const identity = resolveDesktopDistributionIdentity(
+    paths.distribution ?? currentDesktopDistribution(),
+    false,
+  );
+  return NodePath.join(
+    paths.dataHome,
+    identity.integrationDirectoryName,
+    "hyprland-capture",
+    HYPRLAND_CAPTURE_EXECUTABLE,
+  );
 }
 
 function hyprlandCaptureBinding(appId: string, lua: boolean): string {

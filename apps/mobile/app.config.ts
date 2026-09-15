@@ -3,7 +3,7 @@ import type { ExpoConfig } from "expo/config";
 import { BRAND_ASSET_PATHS } from "../../scripts/lib/brand-assets.ts";
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
 
-type AppVariant = "development" | "preview" | "production";
+type AppVariant = "development" | "preview" | "production" | "devin";
 
 const repoEnv = loadRepoEnv();
 Object.assign(process.env, repoEnv);
@@ -96,6 +96,14 @@ const VARIANT_CONFIG = {
     relyingParty: "clerk.t3.codes",
     assets: RELEASE_ASSETS,
   },
+  devin: {
+    appName: "t3code+devin",
+    scheme: "t3code-devin",
+    iosBundleIdentifier: "io.github.jagrat7.t3codedevin",
+    androidPackage: "io.github.jagrat7.t3codedevin",
+    relyingParty: "clerk.t3.codes",
+    assets: PREVIEW_ASSETS,
+  },
 } as const;
 
 function resolveAppVariant(value: string | undefined): AppVariant {
@@ -103,6 +111,7 @@ function resolveAppVariant(value: string | undefined): AppVariant {
     case "development":
     case "preview":
     case "production":
+    case "devin":
       return value;
     default:
       return "production";
@@ -211,7 +220,7 @@ const sharingPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
 
 const config: ExpoConfig = {
   name: variant.appName,
-  slug: "t3-code",
+  slug: APP_VARIANT === "devin" ? "t3code-devin" : "t3-code",
   platforms: ["ios", "android"],
   scheme: variant.scheme,
   version: "1.1.1",
@@ -224,12 +233,21 @@ const config: ExpoConfig = {
   orientation: "portrait",
   icon: variant.assets.appIcon,
   userInterfaceStyle: "automatic",
-  updates: {
-    enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
-    url: "https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454",
-    checkAutomatically: "ON_LOAD",
-    fallbackToCacheTimeout: 0,
-  },
+  updates:
+    APP_VARIANT === "devin"
+      ? {
+          // This locally signed build has no relationship with T3 Tools' EAS
+          // project and must never consume its update channels.
+          enabled: false,
+          checkAutomatically: "NEVER",
+          fallbackToCacheTimeout: 0,
+        }
+      : {
+          enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
+          url: "https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454",
+          checkAutomatically: "ON_LOAD",
+          fallbackToCacheTimeout: 0,
+        },
   ios: {
     icon: variant.assets.iosIcon,
     supportsTablet: true,
@@ -240,11 +258,11 @@ const config: ExpoConfig = {
     // Pin code signing to the T3 Tools team so non-interactive `expo run:ios`
     // does not fall back to a personal team (which cannot sign app groups,
     // Sign in with Apple, or push notification entitlements).
-    appleTeamId: "ARK85ZXQ4Z",
-    associatedDomains: [
-      `applinks:${variant.relyingParty}`,
-      `webcredentials:${variant.relyingParty}`,
-    ],
+    ...(APP_VARIANT === "devin" ? {} : { appleTeamId: "ARK85ZXQ4Z" }),
+    associatedDomains:
+      APP_VARIANT === "devin"
+        ? []
+        : [`applinks:${variant.relyingParty}`, `webcredentials:${variant.relyingParty}`],
     entitlements: {
       "keychain-access-groups": [`$(AppIdentifierPrefix)${variant.iosBundleIdentifier}`],
     },
@@ -452,11 +470,15 @@ const config: ExpoConfig = {
       tracesDataset: repoEnv.EXPO_PUBLIC_OTLP_TRACES_DATASET ?? null,
       tracesToken: repoEnv.EXPO_PUBLIC_OTLP_TRACES_TOKEN ?? null,
     },
-    eas: {
-      projectId: "d763fcb8-d37c-41ea-a773-b54a0ab4a454",
-    },
+    ...(APP_VARIANT === "devin"
+      ? {}
+      : {
+          eas: {
+            projectId: "d763fcb8-d37c-41ea-a773-b54a0ab4a454",
+          },
+        }),
   },
-  owner: "pingdotgg",
+  ...(APP_VARIANT === "devin" ? {} : { owner: "pingdotgg" }),
 };
 
 export default config;

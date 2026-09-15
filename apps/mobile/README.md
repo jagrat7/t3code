@@ -139,3 +139,16 @@ vp run eas:android:dev
 vp run eas:android:preview:dev
 vp run eas:android:preview
 ```
+
+## Local t3code+devin APK
+
+The `devin` variant is independent of the store app and does not use EAS. It has the Android
+package ID `io.github.jagrat7.t3codedevin`, uses its own device storage, and disables Expo updates.
+Build its standalone APK locally:
+
+```bash
+vp run android:devin:apk
+```
+
+The APK is written to `android/app/build/outputs/apk/release/app-release.apk`. Build it and the
+`t3code+devin` AppImage from the same commit so the mobile contracts match the bundled server.

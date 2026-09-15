@@ -733,6 +733,7 @@ export const make = Effect.gen(function* () {
       ? path.join(environment.resourcesPath, "gnome-extension")
       : path.join(environment.appRoot, "apps/desktop/gnome-extension"),
     dataHome: path.dirname(environment.linuxApplicationsDir),
+    distribution: environment.distribution,
   };
   const kdeCapturePaths = {
     bundle: environment.isPackaged
@@ -743,6 +744,7 @@ export const make = Effect.gen(function* () {
           KDE_CAPTURE_EXECUTABLE,
         ),
     dataHome: path.dirname(environment.linuxApplicationsDir),
+    distribution: environment.distribution,
   };
   const hasGnomeSetup = () =>
     captureMode(environment.platform) === "portal" && isGnomeCaptureSession(process.env);
@@ -755,6 +757,7 @@ export const make = Effect.gen(function* () {
           HYPRLAND_CAPTURE_EXECUTABLE,
         ),
     dataHome: path.dirname(environment.linuxApplicationsDir),
+    distribution: environment.distribution,
   };
   const shiftShortcutWorkerPath = path.join(__dirname, "snapShot", "GlobalShiftShortcutWorker.cjs");
   const shortcutConfig = new CaptureShortcutConfig();

@@ -13,6 +13,11 @@ import * as Path from "effect/Path";
 
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
+import {
+  currentDesktopDistribution,
+  resolveDesktopDistributionIdentity,
+  type DesktopDistribution,
+} from "./DesktopDistribution.ts";
 import { resolveLinuxDesktopEntryName } from "./DesktopEarlyElectronStartup.ts";
 import { resolveDesktopBaseDir, resolveDesktopStateDir } from "./DesktopStatePaths.ts";
 import { isNightlyDesktopVersion } from "../updates/updateChannels.ts";
@@ -28,6 +33,7 @@ export interface MakeDesktopEnvironmentInput {
   readonly isPackaged: boolean;
   readonly resourcesPath: string;
   readonly runningUnderArm64Translation: boolean;
+  readonly distribution?: DesktopDistribution;
 }
 
 export class DesktopEnvironment extends Context.Service<
@@ -76,6 +82,7 @@ export class DesktopEnvironment extends Context.Service<
     readonly otlpHeaders: Option.Option<Record<string, string>>;
     readonly otlpProtocol: OtlpProtocol;
     readonly branding: DesktopAppBranding;
+    readonly distribution: DesktopDistribution;
     readonly displayName: string;
     readonly appUserModelId: string;
     readonly linuxDesktopEntryName: string;
@@ -84,6 +91,7 @@ export class DesktopEnvironment extends Context.Service<
     readonly appImagePath: Option.Option<string>;
     readonly userDataDirName: string;
     readonly legacyUserDataDirName: string;
+    readonly integrationDirectoryName: string;
     readonly defaultDesktopSettings: DesktopAppSettings.DesktopSettings;
     readonly runtimeInfo: DesktopRuntimeInfo;
     readonly resolvePickFolderDefaultPath: (rawOptions: unknown) => Option.Option<string>;
@@ -107,8 +115,17 @@ function resolveDesktopAppStageLabel(input: {
 export function resolveDesktopAppBranding(input: {
   readonly isDevelopment: boolean;
   readonly appVersion: string;
+  readonly distribution?: DesktopDistribution;
 }): DesktopAppBranding {
+  const distribution = input.distribution ?? currentDesktopDistribution();
   const stageLabel = resolveDesktopAppStageLabel(input);
+  if (distribution === "devin") {
+    return {
+      baseName: "t3code+devin",
+      stageLabel,
+      displayName: "t3code+devin",
+    };
+  }
   return {
     baseName: APP_BASE_NAME,
     stageLabel,
@@ -154,6 +171,8 @@ const make = Effect.fn("desktop.environment.make")(function* (
   const homeDirectory = input.homeDirectory;
   const devServerUrl = config.devServerUrl;
   const isDevelopment = Option.isSome(devServerUrl);
+  const distribution = input.distribution ?? currentDesktopDistribution();
+  const distributionIdentity = resolveDesktopDistributionIdentity(distribution, isDevelopment);
   const appDataDirectory =
     input.platform === "win32"
       ? Option.getOrElse(config.appDataDirectory, () =>
@@ -162,10 +181,18 @@ const make = Effect.fn("desktop.environment.make")(function* (
       : input.platform === "darwin"
         ? path.join(homeDirectory, "Library", "Application Support")
         : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
+  // The Devin distribution deliberately ignores T3CODE_HOME. A globally exported
+  // official T3 home must never redirect this app into the official database.
+  const distributionHome =
+    distribution === "devin"
+      ? Option.orElse(config.devinHome, () =>
+          Option.some(path.join(homeDirectory, ".t3code-devin")),
+        )
+      : config.t3Home;
   const baseDir = resolveDesktopBaseDir({
     homeDirectory,
     joinPath: path.join,
-    t3Home: config.t3Home,
+    t3Home: distributionHome,
   });
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
@@ -176,16 +203,24 @@ const make = Effect.fn("desktop.environment.make")(function* (
   const branding = resolveDesktopAppBranding({
     isDevelopment,
     appVersion: input.appVersion,
+    distribution,
   });
   const displayName = branding.displayName;
   const stateDir = resolveDesktopStateDir({
     baseDir,
     isDevelopment,
     joinPath: path.join,
-    t3Home: config.t3Home,
+    t3Home: distributionHome,
   });
-  const userDataDirName = isDevelopment ? "t3code-dev" : "t3code";
-  const legacyUserDataDirName = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)";
+  const userDataDirName = distributionIdentity.userDataDirName;
+  // The custom distribution has no legacy location and must never probe one
+  // belonging to official T3 Code.
+  const legacyUserDataDirName =
+    distribution === "devin"
+      ? distributionIdentity.userDataDirName
+      : isDevelopment
+        ? "T3 Code (Dev)"
+        : "T3 Code (Alpha)";
   const linuxApplicationsDir = path.join(
     Option.getOrElse(config.xdgDataHome, () => path.join(homeDirectory, ".local", "share")),
     "applications",
@@ -231,16 +266,19 @@ const make = Effect.fn("desktop.environment.make")(function* (
     otlpHeaders: config.otlpHeaders,
     otlpProtocol: config.otlpProtocol,
     branding,
+    distribution,
     displayName,
-    appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
-      isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code",
-    ),
-    linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment),
-    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code",
+    appUserModelId:
+      distribution === "devin"
+        ? distributionIdentity.appId
+        : Option.getOrElse(config.appUserModelIdOverride, () => distributionIdentity.appId),
+    linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment, distribution),
+    linuxWmClass: distributionIdentity.linuxWmClass,
     linuxApplicationsDir,
     appImagePath: config.appImagePath,
     userDataDirName,
     legacyUserDataDirName,
+    integrationDirectoryName: distributionIdentity.integrationDirectoryName,
     defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),
     runtimeInfo: resolveDesktopRuntimeInfo({
       platform: input.platform,

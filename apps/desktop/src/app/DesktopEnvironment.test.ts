@@ -116,6 +116,43 @@ describe("DesktopEnvironment", () => {
     }),
   );
 
+  it.effect("isolates the Devin distribution from official desktop and server state", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment(
+        { distribution: "devin" },
+        {
+          T3CODE_HOME: "/tmp/official-t3",
+          T3CODE_DESKTOP_APP_USER_MODEL_ID: "com.t3tools.t3code",
+        },
+      );
+
+      assert.equal(environment.displayName, "t3code+devin");
+      assert.equal(environment.baseDir, "/Users/alice/.t3code-devin");
+      assert.equal(environment.stateDir, "/Users/alice/.t3code-devin/userdata");
+      assert.equal(environment.userDataDirName, "t3code-devin");
+      assert.equal(environment.legacyUserDataDirName, "t3code-devin");
+      assert.equal(environment.appUserModelId, "io.github.jagrat7.t3codedevin");
+      assert.equal(environment.linuxWmClass, "t3code-devin");
+      assert.equal(environment.linuxDesktopEntryName, "io.github.jagrat7.t3codedevin.desktop");
+      assert.equal(environment.integrationDirectoryName, "t3code-devin");
+    }),
+  );
+
+  it.effect("supports an explicit home only through the Devin-specific variable", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment(
+        { distribution: "devin" },
+        {
+          T3CODE_HOME: "/tmp/official-t3",
+          T3CODE_DEVIN_HOME: " /tmp/t3code-devin ",
+        },
+      );
+
+      assert.equal(environment.baseDir, "/tmp/t3code-devin");
+      assert.equal(environment.stateDir, "/tmp/t3code-devin/userdata");
+    }),
+  );
+
   it.effect("uses the packaged Windows server sidecar as the backend root", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment({

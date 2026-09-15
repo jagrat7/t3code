@@ -9,31 +9,54 @@ import * as Schema from "effect/Schema";
 import type { DesktopCaptureHelperState } from "@t3tools/contracts";
 
 import { escapeDesktopEntryExecArgument } from "../app/DesktopLinuxUrlHandler.ts";
+import {
+  currentDesktopDistribution,
+  resolveDesktopDistributionIdentity,
+  type DesktopDistribution,
+} from "../app/DesktopDistribution.ts";
 import type { LinuxWindowSnapshot } from "./LinuxSnapShot.ts";
 import { readPortalPng } from "./linuxCaptureSession.ts";
 import { startNativeCaptureFeedback } from "./NativeCaptureFeedback.ts";
 export { isKdeCaptureSession } from "./linuxCaptureSession.ts";
 
 export const KDE_CAPTURE_EXECUTABLE = "t3-kde-snap-shot";
-const DESKTOP_FILE = "com.t3tools.T3Code.KdeCapture.desktop";
 const MARKER = "X-T3Code-Capture-Helper=true";
 const decodeCapabilities = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Struct({ feedbackAvailable: Schema.optional(Schema.Boolean) })),
 );
-export type KdeCapturePaths = { readonly bundle: string; readonly dataHome: string };
+export type KdeCapturePaths = {
+  readonly bundle: string;
+  readonly dataHome: string;
+  readonly distribution?: DesktopDistribution;
+};
 
 export function kdeCapturePaths(paths: KdeCapturePaths) {
+  const distribution = paths.distribution ?? currentDesktopDistribution();
+  const identity = resolveDesktopDistributionIdentity(distribution, false);
+  const desktopFile =
+    distribution === "devin"
+      ? "io.github.jagrat7.t3codedevin.KdeCapture.desktop"
+      : "com.t3tools.T3Code.KdeCapture.desktop";
   return {
-    executable: NodePath.join(paths.dataHome, "t3code", "kde-capture", KDE_CAPTURE_EXECUTABLE),
-    desktop: NodePath.join(paths.dataHome, "applications", DESKTOP_FILE),
+    executable: NodePath.join(
+      paths.dataHome,
+      identity.integrationDirectoryName,
+      "kde-capture",
+      KDE_CAPTURE_EXECUTABLE,
+    ),
+    desktop: NodePath.join(paths.dataHome, "applications", desktopFile),
   };
 }
 
-export function kdeCaptureDesktopEntry(executable: string): string {
+export function kdeCaptureDesktopEntry(
+  executable: string,
+  distribution: DesktopDistribution = currentDesktopDistribution(),
+): string {
+  const name = resolveDesktopDistributionIdentity(distribution, false).displayName;
   return [
     "[Desktop Entry]",
     "Type=Application",
-    "Name=T3 Code SnapShots",
+    `Name=${name} SnapShots`,
     "NoDisplay=true",
     `Exec=${escapeDesktopEntryExecArgument(executable)} check`,
     // KService reads this custom property as a KConfig list, not an XDG ';' list.
@@ -118,7 +141,10 @@ export class KdeCaptureSetup {
           status: "error",
           message: "The capture helper is missing from this build. Update or reinstall T3 Code.",
         };
-      if (!installed.equals(bundle) || entry.toString() !== kdeCaptureDesktopEntry(executable))
+      if (
+        !installed.equals(bundle) ||
+        entry.toString() !== kdeCaptureDesktopEntry(executable, this.paths.distribution)
+      )
         return {
           status: "update-required",
           message: "Update the bundled capture helper to continue.",
@@ -172,10 +198,14 @@ export class KdeCaptureSetup {
         const staged = NodePath.join(staging, KDE_CAPTURE_EXECUTABLE);
         await NodeFSP.writeFile(staged, bundle, { mode: 0o755 });
         await NodeFSP.rename(staged, executable);
-        await NodeFSP.writeFile(stagedDesktop, kdeCaptureDesktopEntry(executable), {
-          mode: 0o644,
-          flag: "wx",
-        });
+        await NodeFSP.writeFile(
+          stagedDesktop,
+          kdeCaptureDesktopEntry(executable, this.paths.distribution),
+          {
+            mode: 0o644,
+            flag: "wx",
+          },
+        );
         await NodeFSP.rename(stagedDesktop, desktop);
       } finally {
         await NodeFSP.rm(stagedDesktop, { force: true });

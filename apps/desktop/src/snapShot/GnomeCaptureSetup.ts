@@ -5,8 +5,13 @@ import * as NodePath from "node:path";
 import { Message, sessionBus, type MessageBus, type MessageLike } from "dbus-next";
 import * as Schema from "effect/Schema";
 import type { DesktopCaptureExtensionState } from "@t3tools/contracts";
+import {
+  currentDesktopDistribution,
+  resolveDesktopDistributionIdentity,
+  type DesktopDistribution,
+} from "../app/DesktopDistribution.ts";
 
-import { GNOME_CAPTURE_FILES, GNOME_CAPTURE_UUID } from "./gnomeCaptureBundle.ts";
+import { GNOME_CAPTURE_FILES, resolveGnomeCaptureUuid } from "./gnomeCaptureBundle.ts";
 export { isGnomeCaptureSession } from "./linuxCaptureSession.ts";
 
 const SHELL = "org.gnome.Shell";
@@ -26,22 +31,40 @@ const decodeProperties = Schema.decodeUnknownSync(
     UserExtensionsEnabled: Schema.Struct({ value: Schema.Boolean }),
   }),
 );
-const Metadata = Schema.Struct({
-  uuid: Schema.Literal(GNOME_CAPTURE_UUID),
-  version: Schema.Number,
-  "shell-version": Schema.Array(Schema.String),
-});
-const decodeMetadata = Schema.decodeUnknownSync(Schema.fromJsonString(Metadata));
+const decodeMetadataJson = Schema.decodeSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      uuid: Schema.String,
+      version: Schema.Number,
+      "shell-version": Schema.Array(Schema.String),
+    }),
+  ),
+);
+const decodeMetadata = (source: string, uuid: string) => {
+  const metadata = decodeMetadataJson(source);
+  if (metadata.uuid !== uuid) {
+    throw new Error(`Expected GNOME extension ${uuid}, found ${metadata.uuid}.`);
+  }
+  return metadata;
+};
 
-type SetupPaths = { readonly bundle: string; readonly dataHome: string };
+type SetupPaths = {
+  readonly bundle: string;
+  readonly dataHome: string;
+  readonly distribution?: DesktopDistribution;
+};
 
 /** Copies only the shipped extension, offline. Replaced versions are kept for recovery. */
-export async function installGnomeCaptureBundle({ bundle, dataHome }: SetupPaths) {
+export async function installGnomeCaptureBundle(input: SetupPaths) {
+  const { bundle, dataHome } = input;
+  const distribution = input.distribution ?? currentDesktopDistribution();
+  const uuid = resolveGnomeCaptureUuid(distribution);
   const metadata = decodeMetadata(
     await NodeFSP.readFile(NodePath.join(bundle, "metadata.json"), "utf8"),
+    uuid,
   );
   const parent = NodePath.join(dataHome, "gnome-shell", "extensions");
-  const target = NodePath.join(parent, GNOME_CAPTURE_UUID);
+  const target = NodePath.join(parent, uuid);
   await NodeFSP.mkdir(parent, { recursive: true });
   const existing = await NodeFSP.lstat(target).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "ENOENT") throw error;
@@ -54,6 +77,7 @@ export async function installGnomeCaptureBundle({ bundle, dataHome }: SetupPaths
   if (existing) {
     const installed = decodeMetadata(
       await NodeFSP.readFile(NodePath.join(target, "metadata.json"), "utf8"),
+      uuid,
     );
     if (installed.version > metadata.version)
       throw new Error("A newer extension is installed. Update T3 Code instead of replacing it.");
@@ -67,12 +91,14 @@ export async function installGnomeCaptureBundle({ bundle, dataHome }: SetupPaths
     }
     await NodeFSP.chmod(staged, 0o755);
     if (existing) {
-      const backupParent = NodePath.join(dataHome, "t3code", "extension-backups");
-      await NodeFSP.mkdir(backupParent, { recursive: true });
-      backup = NodePath.join(
-        await NodeFSP.mkdtemp(NodePath.join(backupParent, "capture-")),
-        GNOME_CAPTURE_UUID,
+      const identity = resolveDesktopDistributionIdentity(distribution, false);
+      const backupParent = NodePath.join(
+        dataHome,
+        identity.integrationDirectoryName,
+        "extension-backups",
       );
+      await NodeFSP.mkdir(backupParent, { recursive: true });
+      backup = NodePath.join(await NodeFSP.mkdtemp(NodePath.join(backupParent, "capture-")), uuid);
       await NodeFSP.rename(target, backup);
     }
     try {
@@ -136,6 +162,7 @@ export class GnomeCaptureSetup {
 
   async state(): Promise<DesktopCaptureExtensionState> {
     try {
+      const uuid = resolveGnomeCaptureUuid(this.paths.distribution ?? currentDesktopDistribution());
       const [properties, info, bundled, installed] = await Promise.all([
         this.call({
           interface: "org.freedesktop.DBus.Properties",
@@ -147,22 +174,16 @@ export class GnomeCaptureSetup {
           interface: EXTENSIONS,
           member: "GetExtensionInfo",
           signature: "s",
-          body: [GNOME_CAPTURE_UUID],
+          body: [uuid],
         }).then(decodeInfo),
-        NodeFSP.readFile(NodePath.join(this.paths.bundle, "metadata.json"), "utf8").then(
-          decodeMetadata,
+        NodeFSP.readFile(NodePath.join(this.paths.bundle, "metadata.json"), "utf8").then((source) =>
+          decodeMetadata(source, uuid),
         ),
         NodeFSP.readFile(
-          NodePath.join(
-            this.paths.dataHome,
-            "gnome-shell",
-            "extensions",
-            GNOME_CAPTURE_UUID,
-            "metadata.json",
-          ),
+          NodePath.join(this.paths.dataHome, "gnome-shell", "extensions", uuid, "metadata.json"),
           "utf8",
         )
-          .then(decodeMetadata)
+          .then((source) => decodeMetadata(source, uuid))
           .catch((error: NodeJS.ErrnoException) => {
             if (error.code !== "ENOENT") throw error;
             return undefined;
@@ -224,6 +245,7 @@ export class GnomeCaptureSetup {
   }
 
   async perform(action: "install-extension" | "enable-extension" | "disable-extension") {
+    const uuid = resolveGnomeCaptureUuid(this.paths.distribution ?? currentDesktopDistribution());
     const state = await this.state();
     if (action === "install-extension") {
       if (state.status !== "not-installed" && state.status !== "update-required")
@@ -238,7 +260,7 @@ export class GnomeCaptureSetup {
       interface: EXTENSIONS,
       member: action === "enable-extension" ? "EnableExtension" : "DisableExtension",
       signature: "s",
-      body: [GNOME_CAPTURE_UUID],
+      body: [uuid],
     });
     if (result !== true)
       throw new Error("GNOME has not loaded the extension. Sign out and back in, then try again.");

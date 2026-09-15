@@ -14,6 +14,11 @@ import {
   resolveDesktopStateDir,
   type JoinPath,
 } from "./DesktopStatePaths.ts";
+import {
+  currentDesktopDistribution,
+  resolveDesktopDistributionIdentity,
+  type DesktopDistribution,
+} from "./DesktopDistribution.ts";
 
 interface EarlyDesktopSettingsInput {
   readonly env: NodeJS.ProcessEnv;
@@ -31,8 +36,10 @@ export interface EarlyLinuxElectronOptions {
   readonly passwordStore: LinuxPasswordStoreSwitch | null;
 }
 
-export const resolveLinuxDesktopEntryName = (isDevelopment: boolean): string =>
-  isDevelopment ? "com.t3tools.T3Code.Development.desktop" : "com.t3tools.T3Code.desktop";
+export const resolveLinuxDesktopEntryName = (
+  isDevelopment: boolean,
+  distribution: DesktopDistribution = currentDesktopDistribution(),
+): string => resolveDesktopDistributionIdentity(distribution, isDevelopment).linuxDesktopEntryName;
 
 const trimNonEmpty = (value: string | undefined): string | null => {
   const trimmed = value?.trim();
@@ -55,16 +62,24 @@ function resolveEarlyDesktopSettingsPath(input: {
   readonly joinPath: JoinPath;
 }): string {
   const t3Home = Option.fromUndefinedOr(input.env.T3CODE_HOME);
+  const distribution = currentDesktopDistribution();
+  const distributionHome =
+    distribution === "devin"
+      ? Option.some(
+          trimNonEmpty(input.env.T3CODE_DEVIN_HOME) ??
+            input.joinPath(input.homeDirectory, ".t3code-devin"),
+        )
+      : t3Home;
   const baseDir = resolveDesktopBaseDir({
     homeDirectory: input.homeDirectory,
     joinPath: input.joinPath,
-    t3Home,
+    t3Home: distributionHome,
   });
   const stateDir = resolveDesktopStateDir({
     baseDir,
     isDevelopment: isDevelopmentEnvironment(input.env),
     joinPath: input.joinPath,
-    t3Home,
+    t3Home: distributionHome,
   });
   return input.joinPath(stateDir, "desktop-settings.json");
 }
@@ -86,10 +101,12 @@ export function resolveEarlyLinuxElectronOptions(
 ): EarlyLinuxElectronOptions {
   const preference = resolveEarlyLinuxPasswordStorePreference(input);
   const isDevelopment = isDevelopmentEnvironment(input.env);
+  const distribution = currentDesktopDistribution();
+  const identity = resolveDesktopDistributionIdentity(distribution, isDevelopment);
   return {
     isDevelopment,
-    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code",
-    linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment),
+    linuxWmClass: identity.linuxWmClass,
+    linuxDesktopEntryName: identity.linuxDesktopEntryName,
     passwordStore: resolveLinuxPasswordStoreSwitch({
       preference,
       env: input.env,
