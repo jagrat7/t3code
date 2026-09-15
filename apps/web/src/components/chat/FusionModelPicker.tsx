@@ -63,7 +63,7 @@ export function FusionModelPicker(props: {
         </div>
         {pairing ? (
           <div className="relative grid min-h-36 min-w-0 grid-cols-2 items-center gap-1 pr-12 pl-1 sm:gap-4 sm:pr-14 sm:pl-3">
-            <FusionWave animated />
+            <FusionWave />
             <div className="relative min-w-0 space-y-1">
               <Select
                 value={pairing.lead.id}

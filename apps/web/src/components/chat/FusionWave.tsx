@@ -1,21 +1,7 @@
-import { useId, useSyncExternalStore } from "react";
-import "./FusionWave.css";
-
-function subscribeVisibility(onChange: () => void) {
-  document.addEventListener("visibilitychange", onChange);
-  return () => document.removeEventListener("visibilitychange", onChange);
-}
-
-const isDocumentVisible = () => document.visibilityState === "visible";
-const serverVisible = () => false;
+import { useId } from "react";
 
 // Two streams skirt the controls, then meet in the reserved space at the right.
-// Dither is generated once; only the open editor animates the packet paths.
-const streams = [
-  "M-8 10 C65 28 200 24 330 24 C352 24 352 60 375 60",
-  "M-8 110 C65 92 200 96 330 96 C352 96 352 60 375 60",
-  "M375 60 H408",
-];
+// The dither is generated once and stays static.
 const wavePaths = [0, 1, 2].map((tone) => {
   const upper: string[] = [];
   const lower: string[] = [];
@@ -38,18 +24,16 @@ const wavePaths = [0, 1, 2].map((tone) => {
   return { upper: upper.join(""), lower: lower.join(""), tone, opacity: [0.12, 0.24, 0.4][tone] };
 });
 
-export function FusionWave({ animated = false }: { animated?: boolean }) {
+export function FusionWave() {
   const gradientId = useId();
   const upperFill = `url(#${gradientId}-upper)`;
   const lowerFill = `url(#${gradientId}-lower)`;
-  const visible = useSyncExternalStore(subscribeVisibility, isDocumentVisible, serverVisible);
   return (
     <svg
       aria-hidden="true"
-      data-paused={!visible}
       viewBox="0 0 400 120"
       preserveAspectRatio="none"
-      className="fusion-wave pointer-events-none absolute inset-0 size-full"
+      className="pointer-events-none absolute inset-0 size-full"
     >
       <defs>
         <linearGradient
@@ -75,18 +59,6 @@ export function FusionWave({ animated = false }: { animated?: boolean }) {
           <stop offset="1" stopColor="#0294DE" />
         </linearGradient>
       </defs>
-      {animated && (
-        <g fill="none" stroke="#0294DE" strokeWidth="2" strokeDasharray="2 10" opacity="0.8">
-          {streams.map((d, index) => (
-            <path
-              key={d}
-              className="fusion-wave-packets"
-              d={d}
-              stroke={index === 0 ? upperFill : index === 1 ? lowerFill : "#0294DE"}
-            />
-          ))}
-        </g>
-      )}
       {wavePaths.map((path) => (
         <g key={path.tone} opacity={path.opacity}>
           <path d={path.upper} fill={upperFill} />
