@@ -55,6 +55,9 @@ const failSetConfigOption = process.env.T3_ACP_FAIL_SET_CONFIG_OPTION === "1";
 const exitOnSetConfigOption = process.env.T3_ACP_EXIT_ON_SET_CONFIG_OPTION === "1";
 const exitOnPrompt = process.env.T3_ACP_EXIT_ON_PROMPT === "1";
 const imageCapability = process.env.T3_ACP_IMAGE_CAPABILITY === "1";
+// Devin advertises its MCP extension through agentCapabilities._meta and
+// answers `_cognition.ai/mcp/connectServer`.
+const devinMcpExtension = process.env.T3_ACP_DEVIN_MCP === "1";
 const advertisedModelIds = process.env.T3_ACP_MODEL_IDS?.split(",")
   .map((value) => value.trim())
   .filter((value) => value.length > 0);
@@ -429,6 +432,15 @@ const program = Effect.gen(function* () {
           sessionCapabilities: { resume: {} },
           ...(imageCapability
             ? { promptCapabilities: { image: true, embeddedContext: true } }
+            : {}),
+          ...(devinMcpExtension
+            ? {
+                mcpCapabilities: { http: false, sse: false },
+                _meta: {
+                  "cognition.ai/mcp": true,
+                  "cognition.ai/mcpWorkspaceDirs": true,
+                },
+              }
             : {}),
         },
         // Grok advertises model state before any session exists; the provider
@@ -1373,6 +1385,13 @@ const program = Effect.gen(function* () {
   );
 
   yield* agent.handleUnknownExtRequest((method, params) => {
+    if (method === "_cognition.ai/mcp/connectServer") {
+      return devinMcpExtension
+        ? Effect.succeed({
+            connectionStatus: process.env.T3_ACP_DEVIN_MCP_STATUS ?? "connected",
+          })
+        : Effect.fail(AcpError.AcpRequestError.methodNotFound(method));
+    }
     if (method === "_test/environment") {
       return Effect.succeed({
         inherited: process.env.T3_ACP_RUNTIME_AMBIENT === "sentinel",

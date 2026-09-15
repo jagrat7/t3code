@@ -20,6 +20,7 @@ import * as TestClock from "effect/testing/TestClock";
 import {
   ApprovalRequestId,
   DevinSettings,
+  EnvironmentId,
   ProviderDriverKind,
   type ProviderRuntimeEvent,
   ThreadId,
@@ -34,6 +35,7 @@ import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeDevinAdapter } from "./DevinAdapter.ts";
 import { DevinSkillCatalog } from "../Drivers/DevinSkills.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 const decodeDevinSettings = Schema.decodeSync(DevinSettings);
@@ -60,6 +62,10 @@ const windowsHost = HostProcessPlatform.defaultValue() === "win32";
 // single-variant family per `T3_ACP_MODEL_IDS` entry (default `adaptive`),
 // and execs the ACP mock for anything else.
 const modelsListStubSource = [
+  "if (process.env.T3_DEVIN_LAUNCH_LOG) {",
+  '  (await import("node:fs")).appendFileSync(process.env.T3_DEVIN_LAUNCH_LOG,',
+  '    JSON.stringify({ args: process.argv.slice(2), device: process.env.T3_TEST_DEVICE ?? null }) + "\\n");',
+  "}",
   'if (process.argv[2] === "models") {',
   "  const catalog = process.env.T3_DEVIN_MODELS_JSON ?? JSON.stringify({",
   '    families: (process.env.T3_ACP_MODEL_IDS ?? "adaptive")',
@@ -2248,5 +2254,224 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
       assert.isFalse(events.some((event) => event.type === "session.started"));
       assert.equal(yield* adapter.hasSession(threadId), false);
     }),
+  );
+
+  const registerT3Tools = (threadId: ThreadId) =>
+    Effect.acquireRelease(
+      Effect.sync(() =>
+        McpProviderSession.setMcpProviderSession({
+          environmentId: EnvironmentId.make("test-environment"),
+          threadId,
+          providerSessionId: "test-session",
+          providerInstanceId: ProviderInstanceId.make("devin"),
+          endpoint: "http://127.0.0.1:1234/mcp",
+          authorizationHeader: "Bearer test-only",
+          capabilities: new Set(["preview", "device"]),
+          agentDeviceEnvironment: { T3_TEST_DEVICE: "available" },
+        }),
+      ),
+      () => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId)),
+    );
+
+  it.effect(
+    "connects T3 Code tools through Devin's MCP extension and cleans them up with the session",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const adapter = yield* DevinAdapter;
+          const settings = yield* ServerSettingsService;
+          const serverConfig = yield* ServerConfig;
+          const threadId = ThreadId.make("devin-mcp");
+          const requestLogPath = NodePath.join(
+            yield* Effect.promise(() =>
+              NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-mcp-logs-")),
+            ),
+            "requests.jsonl",
+          );
+          const launchLogPath = NodePath.join(NodePath.dirname(requestLogPath), "launches.jsonl");
+          yield* registerT3Tools(threadId);
+
+          const wrapperPath = yield* Effect.promise(() =>
+            makeProbeWrapper(requestLogPath, launchLogPath + ".argv", {
+              T3_ACP_DEVIN_MCP: "1",
+              T3_DEVIN_LAUNCH_LOG: launchLogPath,
+            }),
+          );
+          yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+
+          const session = yield* adapter.startSession({
+            threadId,
+            provider: ProviderDriverKind.make("devin"),
+            cwd: process.cwd(),
+            runtimeMode: "full-access",
+          });
+
+          const requests = yield* waitForJsonLogMatch(
+            requestLogPath,
+            (entry) => entry.method === "_cognition.ai/mcp/connectServer",
+          );
+          const newParams = requests.find((entry) => entry.method === "session/new")?.params as
+            | Record<string, unknown>
+            | undefined;
+          const directories = newParams?.additionalDirectories as ReadonlyArray<string>;
+          assert.lengthOf(directories, 2);
+          assert.equal(directories[0], serverConfig.attachmentsDir);
+          const mcpDirectory = directories[1]!;
+          assert.notEqual(mcpDirectory, serverConfig.attachmentsDir);
+
+          const connect = requests.find(
+            (entry) => entry.method === "_cognition.ai/mcp/connectServer",
+          )?.params as Record<string, unknown> | undefined;
+          assert.equal(connect?.serverId, "t3-code");
+          assert.deepEqual(connect?.workspaceDirs, [mcpDirectory]);
+
+          // The credential lives only inside the session-scoped root Devin
+          // reads; it never crosses to clients or the provider snapshot.
+          const configFile = NodePath.join(mcpDirectory, ".devin", "mcp_config.local.json");
+          const decodeConfig = Schema.decodeUnknownEffect(
+            Schema.fromJsonString(
+              Schema.Struct({
+                mcpServers: Schema.Struct({
+                  "t3-code": Schema.Struct({
+                    serverUrl: Schema.String,
+                    headers: Schema.Struct({ Authorization: Schema.String }),
+                  }),
+                }),
+              }),
+            ),
+          );
+          const config = yield* decodeConfig(
+            yield* Effect.promise(() => NodeFSP.readFile(configFile, "utf8")),
+          );
+          assert.deepEqual(config.mcpServers["t3-code"], {
+            serverUrl: "http://127.0.0.1:1234/mcp",
+            headers: { Authorization: "Bearer test-only" },
+          });
+
+          // The device shim environment reaches the spawned ACP process.
+          const launches = (yield* Effect.promise(() => NodeFSP.readFile(launchLogPath, "utf8")))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line) as { args: string[]; device: string | null });
+          assert.deepEqual(
+            launches.filter((launch) => launch.args[0] === "acp").map((l) => l.device),
+            ["available"],
+          );
+
+          yield* adapter.stopSession(threadId);
+          const stillExists = yield* Effect.promise(() =>
+            NodeFSP.stat(mcpDirectory).then(
+              () => true,
+              () => false,
+            ),
+          );
+          assert.isFalse(stillExists, "MCP config directory must be removed on stop");
+
+          // A loaded session re-prepares fresh configuration and reconnects.
+          yield* adapter.startSession({
+            threadId,
+            provider: ProviderDriverKind.make("devin"),
+            cwd: process.cwd(),
+            runtimeMode: "full-access",
+            resumeCursor: session.resumeCursor,
+          });
+          const resumed = yield* waitForJsonLogMatch(
+            requestLogPath,
+            (entry) => entry.method === "session/load",
+          );
+          const loadParams = resumed.find((entry) => entry.method === "session/load")?.params as
+            | Record<string, unknown>
+            | undefined;
+          const resumedDirectories = loadParams?.additionalDirectories as ReadonlyArray<string>;
+          assert.lengthOf(resumedDirectories, 2);
+          assert.notEqual(resumedDirectories[1], mcpDirectory);
+          const resumedConnects = resumed.filter(
+            (entry) => entry.method === "_cognition.ai/mcp/connectServer",
+          );
+          assert.isTrue(
+            resumedConnects.some((entry) => {
+              const dirs = (entry.params as { workspaceDirs?: ReadonlyArray<string> } | undefined)
+                ?.workspaceDirs;
+              return dirs?.[0] === resumedDirectories[1];
+            }),
+          );
+          yield* adapter.stopSession(threadId);
+        }),
+      ),
+  );
+
+  it.effect("skips the MCP connect when the Devin CLI does not advertise the extension", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const adapter = yield* DevinAdapter;
+        const settings = yield* ServerSettingsService;
+        const threadId = ThreadId.make("devin-mcp-unsupported");
+        const logDir = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-mcp-logs-")),
+        );
+        const requestLogPath = NodePath.join(logDir, "requests.jsonl");
+        const argvLogPath = NodePath.join(logDir, "argv.jsonl");
+        yield* registerT3Tools(threadId);
+
+        const wrapperPath = yield* Effect.promise(() =>
+          makeProbeWrapper(requestLogPath, argvLogPath),
+        );
+        yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+
+        const session = yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        assert.equal(session.status, "ready");
+
+        const requests = yield* waitForJsonLogMatch(
+          requestLogPath,
+          (entry) => entry.method === "session/set_config_option",
+        );
+        assert.isFalse(
+          requests.some((entry) => entry.method === "_cognition.ai/mcp/connectServer"),
+        );
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("fails session start when Devin reports the MCP connection failed", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const adapter = yield* DevinAdapter;
+        const settings = yield* ServerSettingsService;
+        const threadId = ThreadId.make("devin-mcp-failed");
+        const requestLogPath = NodePath.join(
+          yield* Effect.promise(() =>
+            NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-mcp-logs-")),
+          ),
+          "requests.jsonl",
+        );
+        const argvLogPath = NodePath.join(NodePath.dirname(requestLogPath), "argv.jsonl");
+        yield* registerT3Tools(threadId);
+
+        const wrapperPath = yield* Effect.promise(() =>
+          makeProbeWrapper(requestLogPath, argvLogPath, {
+            T3_ACP_DEVIN_MCP: "1",
+            T3_ACP_DEVIN_MCP_STATUS: "failed",
+          }),
+        );
+        yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+
+        const error = yield* adapter
+          .startSession({
+            threadId,
+            provider: ProviderDriverKind.make("devin"),
+            cwd: process.cwd(),
+            runtimeMode: "full-access",
+          })
+          .pipe(Effect.flip);
+        assert.include(["ProviderAdapterRequestError", "ProviderAdapterProcessError"], error._tag);
+        assert.equal(yield* adapter.hasSession(threadId), false);
+      }),
+    ),
   );
 });

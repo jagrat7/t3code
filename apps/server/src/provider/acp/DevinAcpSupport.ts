@@ -12,7 +12,9 @@
 import { type DevinSettings, ModelSelection } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -23,6 +25,72 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
 import { DevinModelCatalog, resolveDevinModel } from "./DevinModels.ts";
 import { spawnAndCollect } from "../providerSnapshot.ts";
+import type { McpProviderSessionConfig } from "../../mcp/McpProviderSession.ts";
+
+/**
+ * Devin advertises its MCP extension through `agentCapabilities._meta`
+ * rather than the standard `mcpCapabilities` (which it reports as
+ * `{ http: false, sse: false }`). Sessions without it do not understand
+ * `_cognition.ai/mcp/connectServer`.
+ */
+export const devinSupportsMcpExtension = (
+  initializeResult: Pick<
+    AcpSessionRuntime.AcpSessionRuntimeStartResult,
+    "initializeResult"
+  >["initializeResult"],
+): boolean => initializeResult.agentCapabilities?._meta?.["cognition.ai/mcp"] === true;
+
+const encodeMcpConfig = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeMcpConnected = Schema.decodeUnknownEffect(
+  Schema.Struct({ connectionStatus: Schema.Literal("connected") }),
+);
+
+/**
+ * Devin resolves MCP tools from `.devin/mcp_config.local.json` inside its
+ * session roots instead of the ACP `mcpServers` field, so the T3 Code
+ * credential travels as a scoped config file plus the
+ * `_cognition.ai/mcp/connectServer` extension request. The directory is
+ * bound to the provided scope so the token-bearing file dies with the
+ * session.
+ */
+export const prepareDevinMcp = Effect.fn("prepareDevinMcp")(function* (
+  session: Pick<McpProviderSessionConfig, "endpoint" | "authorizationHeader">,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-devin-mcp-" });
+  const configDirectory = path.join(directory, ".devin");
+  yield* fs.makeDirectory(configDirectory, { mode: 0o700 });
+  yield* fs.writeFileString(
+    path.join(configDirectory, "mcp_config.local.json"),
+    encodeMcpConfig({
+      mcpServers: {
+        "t3-code": {
+          serverUrl: session.endpoint,
+          headers: { Authorization: session.authorizationHeader },
+        },
+      },
+    }),
+    { mode: 0o600 },
+  );
+  const connect = (runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "request">) =>
+    runtime
+      .request("_cognition.ai/mcp/connectServer", {
+        serverId: "t3-code",
+        workspaceDirs: [directory],
+      })
+      .pipe(
+        Effect.flatMap(decodeMcpConnected),
+        Effect.timeout("20 seconds"),
+        Effect.asVoid,
+        Effect.mapError(() =>
+          EffectAcpErrors.AcpRequestError.internalError(
+            "Devin could not connect to T3 Code tools.",
+          ),
+        ),
+      );
+  return { directory, connect };
+});
 
 type DevinAcpRuntimeDevinSettings = Pick<DevinSettings, "binaryPath">;
 
@@ -120,6 +188,9 @@ export const makeDevinAcpRuntime = (
       AcpSessionRuntime.layer({
         ...input,
         spawn: buildDevinAcpSpawnInput(input.devinSettings, input.cwd, input.environment),
+        clientCapabilities: {
+          _meta: { "cognition.ai/mcp": true, "cognition.ai/mcpWorkspaceDirs": true },
+        },
         // ACP's cached model choices can omit valid Fusion IDs indefinitely.
         // The fresh CLI catalog resolves selections; Devin's setter remains
         // authoritative for availability.
