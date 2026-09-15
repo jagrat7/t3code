@@ -31,11 +31,13 @@ See [images and videos](#images-and-videos-in-messages) for previewing and savin
 
 ## Send while the agent is working
 
-A message sent during a running turn waits at the end of the conversation as a
-dashed bubble. It goes out on its own when the agent finishes its next tool
-call, or when the turn ends. Use the arrow under the bubble to send it right
-away, or the X to move it back into the composer. Stop returns every queued
-message to the composer.
+A message sent during a running turn waits in a queue above the composer. It
+goes out on its own when the agent finishes its next tool call, or when the
+turn ends. Press Enter again in the now-empty composer to send the first
+queued message right away. The queue can also send a message now, move it
+back into the composer to edit, or remove it. Stop keeps queued messages in
+place as held items — each waits for Send now or Enter instead of sending
+on its own.
 
 ## Queue messages offline on mobile
 

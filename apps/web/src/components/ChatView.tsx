@@ -520,7 +520,6 @@ import {
 } from "./chat/composerPromptHistory";
 
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
-const EMPTY_QUEUED_MESSAGES: QueuedComposerMessage[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_USAGE_LIMIT_SOURCES: UsageLimitSourceSnapshots = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
@@ -3915,18 +3914,16 @@ export default function ChatView(props: ChatViewProps) {
 
   const interruptContextRef = useRef({ activeThread, phase, setThreadError });
   interruptContextRef.current = { activeThread, phase, setThreadError };
-  const restoreQueuedMessagesRef = useRef<(messages: ReadonlyArray<QueuedComposerMessage>) => void>(
-    () => {},
-  );
   const onInterrupt = useCallback(async () => {
     const { activeThread, phase, setThreadError } = interruptContextRef.current;
     const input = buildRunningThreadTurnInterruptInput(activeThread, phase);
     if (!input || !activeThread) return;
-    restoreQueuedMessagesRef.current(
-      useQueuedMessageStore
-        .getState()
-        .drain(scopedThreadKey(scopeThreadRef(activeThread.environmentId, activeThread.id))),
-    );
+    // Stop keeps the queue: every message is held in place and waits for an
+    // explicit Send now instead of dispatching into the interrupted turn or
+    // being folded back into the composer.
+    useQueuedMessageStore
+      .getState()
+      .holdAll(scopedThreadKey(scopeThreadRef(activeThread.environmentId, activeThread.id)));
     const result = await interruptThreadTurn({
       environmentId: activeThread.environmentId,
       input,
@@ -7466,6 +7463,22 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (!hasSendableContent) {
+      // Enter on an empty composer sends the queue front now — the Zed
+      // gesture: Enter queues the message, Enter again sends it. Held
+      // messages still go since this is an explicit send, and every new
+      // front is sendable the same way.
+      const frontQueuedMessage = queuedMessages[0];
+      if (
+        frontQueuedMessage &&
+        !queuedMessage &&
+        !directAnnotation &&
+        activeThreadKey &&
+        expiredTerminalContextCount === 0 &&
+        !queueBlockedByPendingRequest
+      ) {
+        void onSend(undefined, frontQueuedMessage.submissionIntent, undefined, frontQueuedMessage);
+        return;
+      }
       if (expiredTerminalContextCount > 0) {
         const toastCopy = buildExpiredTerminalContextToastCopy(
           expiredTerminalContextCount,
@@ -7624,10 +7637,13 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
     }
-    // Stop drains the queue. A queued send whose upload was still running at
-    // that moment must not start a turn afterwards; it checks this before
-    // dispatch and hands the message back to the composer instead.
-    const drainGenerationAtTake = useQueuedMessageStore.getState().drainGeneration;
+    // Stop and Clear all reset the queue. A queued send whose upload was
+    // still running at that moment must not start a turn afterwards; it
+    // checks this before dispatch and puts the message back where the reset
+    // left the queue.
+    const queueResetGenerationAtTake = activeThreadKey
+      ? (useQueuedMessageStore.getState().queueResetsByThreadKey[activeThreadKey]?.generation ?? 0)
+      : 0;
     // A queued send that fails goes back to the head of the queue, held. The
     // messages behind it keep their order and wait; the composer is not
     // touched, which also keeps a failure after navigation off the new
@@ -7672,13 +7688,17 @@ export default function ChatView(props: ChatViewProps) {
       }
     }
 
-    if (
-      queuedMessage &&
-      useQueuedMessageStore.getState().drainGeneration !== drainGenerationAtTake
-    ) {
-      sendInFlightRef.current = false;
-      restoreQueuedMessagesToComposer([queuedMessage]);
-      return;
+    if (queuedMessage && activeThreadKey) {
+      const queueReset = useQueuedMessageStore.getState().queueResetsByThreadKey[activeThreadKey];
+      if (queueReset && queueReset.generation !== queueResetGenerationAtTake) {
+        sendInFlightRef.current = false;
+        if (queueReset.keptInQueue) {
+          useQueuedMessageStore.getState().holdAtFront(activeThreadKey, queuedMessage);
+        } else {
+          restoreQueuedMessagesToComposer([queuedMessage]);
+        }
+        return;
+      }
     }
 
     const resolvedSubmissionIntent =
@@ -8201,11 +8221,13 @@ export default function ChatView(props: ChatViewProps) {
     queueSendGate,
   ]);
 
-  // The row handlers are read from refs at call-time so their identity stays
-  // stable and does not bust TimelineRowCtx on every ChatView render.
+  // The queue panel handlers are read from refs at call-time so their
+  // identity stays stable across ChatView renders.
   const queuedMessageActionsRef = useRef({
     steer: (_id: string) => {},
-    remove: (_id: string) => {},
+    edit: (_id: string) => {},
+    discard: (_id: string) => {},
+    clearAll: () => {},
   });
   queuedMessageActionsRef.current = {
     steer: (id) => {
@@ -8213,21 +8235,35 @@ export default function ChatView(props: ChatViewProps) {
       if (!message || sendInFlightRef.current || queueBlockedByPendingRequest) return;
       void onSend(undefined, message.submissionIntent, undefined, message);
     },
-    remove: (id) => {
+    edit: (id) => {
       if (!activeThreadKey) return;
       const message = useQueuedMessageStore.getState().remove(activeThreadKey, id);
-      if (message) restoreQueuedMessagesToComposer([message]);
+      if (message) {
+        restoreQueuedMessagesToComposer([message]);
+        scheduleComposerFocus();
+      }
+    },
+    discard: (id) => {
+      if (!activeThreadKey) return;
+      useQueuedMessageStore.getState().remove(activeThreadKey, id);
+    },
+    clearAll: () => {
+      if (!activeThreadKey) return;
+      useQueuedMessageStore.getState().drain(activeThreadKey);
     },
   };
   const onSteerQueuedMessage = useCallback((id: string) => {
     queuedMessageActionsRef.current.steer(id);
   }, []);
-  const onRemoveQueuedMessage = useCallback((id: string) => {
-    queuedMessageActionsRef.current.remove(id);
+  const onEditQueuedMessage = useCallback((id: string) => {
+    queuedMessageActionsRef.current.edit(id);
   }, []);
-  // Stop also cancels the queue: the messages return to the composer instead
-  // of starting a new turn the moment the interrupted one settles.
-  restoreQueuedMessagesRef.current = restoreQueuedMessagesToComposer;
+  const onDiscardQueuedMessage = useCallback((id: string) => {
+    queuedMessageActionsRef.current.discard(id);
+  }, []);
+  const onClearQueuedMessages = useCallback(() => {
+    queuedMessageActionsRef.current.clearAll();
+  }, []);
 
   const onRespondToApproval = useCallback(
     async (requestId: ApprovalRequestId, decision: ProviderApprovalDecision) => {
@@ -9499,9 +9535,6 @@ export default function ChatView(props: ChatViewProps) {
                 hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading}
                 topFadeEnabled={!hasTimelineTopBanner}
                 loadEarlier={paintOnlyDisplayedTimeline ? null : loadEarlierTurns}
-                queuedMessages={paintOnlyDisplayedTimeline ? EMPTY_QUEUED_MESSAGES : queuedMessages}
-                onSteerQueuedMessage={onSteerQueuedMessage}
-                onRemoveQueuedMessage={onRemoveQueuedMessage}
               />
 
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}
@@ -9615,6 +9648,11 @@ export default function ChatView(props: ChatViewProps) {
                             }
                             isPreparingWorktree={isPreparingWorktree}
                             bannerItems={composerBannerItems}
+                            queuedMessages={queuedMessages}
+                            onSteerQueuedMessage={onSteerQueuedMessage}
+                            onEditQueuedMessage={onEditQueuedMessage}
+                            onDiscardQueuedMessage={onDiscardQueuedMessage}
+                            onClearQueuedMessages={onClearQueuedMessages}
                             // With attachments or contexts aboard the pick just inserts the
                             // text, so it sends as a prompt like the typed path would.
                             onUsageLimitsCommand={

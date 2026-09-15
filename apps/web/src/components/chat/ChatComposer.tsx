@@ -141,6 +141,8 @@ import {
   type ComposerBannerStackContent,
   type ComposerBannerStackItem,
 } from "./ComposerBannerStack";
+import { QueuedMessagesPanel } from "./QueuedMessagesPanel";
+import type { QueuedComposerMessage } from "../../queuedMessageStore";
 import { compressImageForStash, prepareImageForAttachment } from "../../lib/imageCompression";
 import {
   fileAttachmentTooLargeMessage,
@@ -1308,6 +1310,14 @@ export interface ChatComposerProps {
   sendDisabledReason: string | null;
   isPreparingWorktree: boolean;
   bannerItems: readonly ComposerBannerStackItem[];
+  /** Messages held while the turn runs; the queue panel docks above the composer. */
+  queuedMessages: readonly QueuedComposerMessage[];
+  onSteerQueuedMessage: (id: string) => void;
+  /** Moves the queued message's content back into the composer for editing. */
+  onEditQueuedMessage: (id: string) => void;
+  /** Drops the queued message without keeping its content. */
+  onDiscardQueuedMessage: (id: string) => void;
+  onClearQueuedMessages: () => void;
   /** Picking /usage-limits from the menu is the action itself; the draft keeps nothing of it. */
   onUsageLimitsCommand?: (() => void) | undefined;
   environmentUnavailable: {
@@ -4581,13 +4591,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     setIsTasksDrawerOpen((open) => !open);
   }, []);
   const hasBannerItems = props.bannerItems.length > 0;
-  const hasBlockingComposerTopDrawer =
-    activePendingApproval !== null || pendingUserInputs.length > 0;
+  const hasPendingComposerRequest = activePendingApproval !== null || pendingUserInputs.length > 0;
   const showInlineTasksBadge =
     activeTasksProgress !== null &&
     activeTaskSteps !== null &&
     !isTasksDrawerOpen &&
-    !hasBlockingComposerTopDrawer &&
+    !hasPendingComposerRequest &&
     (hasBannerItems || showComposerTopDrawer || isComposerCollapsedMobile);
   const inlineTasksBadge = showInlineTasksBadge ? (
     <ComposerTasksBadge
@@ -5019,7 +5028,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const activityStackContent = hasBannerItems ? (
     props.threadSyncPhase ? (
       <ComposerActivityRow phase={props.threadSyncPhase} />
-    ) : !hasBlockingComposerTopDrawer && activeTasksProgress && activeTaskSteps ? (
+    ) : !hasPendingComposerRequest && activeTasksProgress && activeTaskSteps ? (
       <ComposerTasksContent
         expanded={isTasksDrawerOpen}
         onToggle={toggleTasksDrawer}
@@ -5046,10 +5055,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   }, [activeTaskSteps, activeTasksProgress]);
 
   useEffect(() => {
-    if (hasBlockingComposerTopDrawer) {
+    if (hasPendingComposerRequest) {
       setIsTasksDrawerOpen(false);
     }
-  }, [hasBlockingComposerTopDrawer]);
+  }, [hasPendingComposerRequest]);
 
   useEffect(() => {
     setIsTasksDrawerOpen(false);
@@ -5998,7 +6007,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               </ComposerBanner.Root>
             </ComposerBanner.Attachment>
           ) : null}
-          {showComposerTopDrawer && (!isTasksDrawerOpen || hasBlockingComposerTopDrawer) ? (
+          {showComposerTopDrawer && (!isTasksDrawerOpen || hasPendingComposerRequest) ? (
             <ComposerBanner.Attachment>
               <ComposerBanner.Root
                 data-chat-composer-top-drawer="true"
@@ -6123,7 +6132,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           ) : null}
           {!activityStackItem &&
           isTasksDrawerOpen &&
-          !hasBlockingComposerTopDrawer &&
+          !hasPendingComposerRequest &&
           activeTasksProgress &&
           activeTaskSteps ? (
             <ComposerTasksDrawer
@@ -6142,6 +6151,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               />
             </ComposerBanner.Attachment>
           ) : null}
+          <QueuedMessagesPanel
+            messages={props.queuedMessages}
+            // The badge must promise what Enter delivers: the fast-track in
+            // ChatView is also gated by pending approvals and user inputs.
+            showEnterToSendHint={
+              props.queuedMessages.length > 0 &&
+              !composerSendState.hasSendableContent &&
+              composerSendState.expiredTerminalContextCount === 0 &&
+              !hasPendingComposerRequest
+            }
+            onSendNow={props.onSteerQueuedMessage}
+            onEdit={props.onEditQueuedMessage}
+            onDiscard={props.onDiscardQueuedMessage}
+            onClearAll={props.onClearQueuedMessages}
+          />
         </ComposerBanner.Column>
         {!isComposerApprovalState ? (
           <ComposerStashBadge
