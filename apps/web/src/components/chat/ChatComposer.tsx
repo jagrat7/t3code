@@ -141,6 +141,8 @@ import {
   type ComposerBannerStackContent,
   type ComposerBannerStackItem,
 } from "./ComposerBannerStack";
+import { QueuedMessagesPanel } from "./QueuedMessagesPanel";
+import type { QueuedComposerMessage } from "../../queuedMessageStore";
 import { compressImageForStash, prepareImageForAttachment } from "../../lib/imageCompression";
 import {
   fileAttachmentTooLargeMessage,
@@ -1308,6 +1310,14 @@ export interface ChatComposerProps {
   sendDisabledReason: string | null;
   isPreparingWorktree: boolean;
   bannerItems: readonly ComposerBannerStackItem[];
+  /** Messages held while the turn runs; the queue panel docks above the composer. */
+  queuedMessages: readonly QueuedComposerMessage[];
+  onSteerQueuedMessage: (id: string) => void;
+  /** Moves the queued message's content back into the composer for editing. */
+  onEditQueuedMessage: (id: string) => void;
+  /** Drops the queued message without keeping its content. */
+  onDiscardQueuedMessage: (id: string) => void;
+  onClearQueuedMessages: () => void;
   /** Picking /usage-limits from the menu is the action itself; the draft keeps nothing of it. */
   onUsageLimitsCommand?: (() => void) | undefined;
   environmentUnavailable: {
@@ -6142,6 +6152,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               />
             </ComposerBanner.Attachment>
           ) : null}
+          <QueuedMessagesPanel
+            messages={props.queuedMessages}
+            onSendNow={props.onSteerQueuedMessage}
+            onEdit={props.onEditQueuedMessage}
+            onDiscard={props.onDiscardQueuedMessage}
+            onClearAll={props.onClearQueuedMessages}
+          />
         </ComposerBanner.Column>
         {!isComposerApprovalState ? (
           <ComposerStashBadge

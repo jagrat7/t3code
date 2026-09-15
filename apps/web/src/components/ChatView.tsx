@@ -520,7 +520,6 @@ import {
 } from "./chat/composerPromptHistory";
 
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
-const EMPTY_QUEUED_MESSAGES: QueuedComposerMessage[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_USAGE_LIMIT_SOURCES: UsageLimitSourceSnapshots = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
@@ -8201,11 +8200,13 @@ export default function ChatView(props: ChatViewProps) {
     queueSendGate,
   ]);
 
-  // The row handlers are read from refs at call-time so their identity stays
-  // stable and does not bust TimelineRowCtx on every ChatView render.
+  // The queue panel handlers are read from refs at call-time so their
+  // identity stays stable across ChatView renders.
   const queuedMessageActionsRef = useRef({
     steer: (_id: string) => {},
-    remove: (_id: string) => {},
+    edit: (_id: string) => {},
+    discard: (_id: string) => {},
+    clearAll: () => {},
   });
   queuedMessageActionsRef.current = {
     steer: (id) => {
@@ -8213,17 +8214,34 @@ export default function ChatView(props: ChatViewProps) {
       if (!message || sendInFlightRef.current || queueBlockedByPendingRequest) return;
       void onSend(undefined, message.submissionIntent, undefined, message);
     },
-    remove: (id) => {
+    edit: (id) => {
       if (!activeThreadKey) return;
       const message = useQueuedMessageStore.getState().remove(activeThreadKey, id);
-      if (message) restoreQueuedMessagesToComposer([message]);
+      if (message) {
+        restoreQueuedMessagesToComposer([message]);
+        scheduleComposerFocus();
+      }
+    },
+    discard: (id) => {
+      if (!activeThreadKey) return;
+      useQueuedMessageStore.getState().remove(activeThreadKey, id);
+    },
+    clearAll: () => {
+      if (!activeThreadKey) return;
+      useQueuedMessageStore.getState().drain(activeThreadKey);
     },
   };
   const onSteerQueuedMessage = useCallback((id: string) => {
     queuedMessageActionsRef.current.steer(id);
   }, []);
-  const onRemoveQueuedMessage = useCallback((id: string) => {
-    queuedMessageActionsRef.current.remove(id);
+  const onEditQueuedMessage = useCallback((id: string) => {
+    queuedMessageActionsRef.current.edit(id);
+  }, []);
+  const onDiscardQueuedMessage = useCallback((id: string) => {
+    queuedMessageActionsRef.current.discard(id);
+  }, []);
+  const onClearQueuedMessages = useCallback(() => {
+    queuedMessageActionsRef.current.clearAll();
   }, []);
   // Stop also cancels the queue: the messages return to the composer instead
   // of starting a new turn the moment the interrupted one settles.
@@ -9499,9 +9517,6 @@ export default function ChatView(props: ChatViewProps) {
                 hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading}
                 topFadeEnabled={!hasTimelineTopBanner}
                 loadEarlier={paintOnlyDisplayedTimeline ? null : loadEarlierTurns}
-                queuedMessages={paintOnlyDisplayedTimeline ? EMPTY_QUEUED_MESSAGES : queuedMessages}
-                onSteerQueuedMessage={onSteerQueuedMessage}
-                onRemoveQueuedMessage={onRemoveQueuedMessage}
               />
 
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}
@@ -9615,6 +9630,11 @@ export default function ChatView(props: ChatViewProps) {
                             }
                             isPreparingWorktree={isPreparingWorktree}
                             bannerItems={composerBannerItems}
+                            queuedMessages={queuedMessages}
+                            onSteerQueuedMessage={onSteerQueuedMessage}
+                            onEditQueuedMessage={onEditQueuedMessage}
+                            onDiscardQueuedMessage={onDiscardQueuedMessage}
+                            onClearQueuedMessages={onClearQueuedMessages}
                             // With attachments or contexts aboard the pick just inserts the
                             // text, so it sends as a prompt like the typed path would.
                             onUsageLimitsCommand={
