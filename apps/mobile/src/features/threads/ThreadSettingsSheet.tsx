@@ -1288,6 +1288,11 @@ function ThreadSettingsFusionScreen() {
       <FusionModelEditor
         models={models}
         initialKey={route.params.initialKey}
+        initialOptions={
+          session.pendingModel?.fusion
+            ? session.pendingModel.selection.options
+            : models.find((model) => model.key === route.params.initialKey)?.selection.options
+        }
         onSelect={(option) => {
           const pending = session.pendingModel;
           if (session.isApplied(option) && pending?.key !== option.key) {

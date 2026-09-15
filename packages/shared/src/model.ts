@@ -7,6 +7,7 @@ import {
   ProviderInstanceId,
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
+  type ServerProviderModel,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -226,6 +227,33 @@ export function getProviderOptionCurrentLabel(
     return undefined;
   }
   return descriptor.options.find((option) => option.id === currentValue)?.label;
+}
+
+/** Compact label for the Fusion pairing and the options active on its lead model. */
+export function getFusionSelectionSummary(input: {
+  readonly fusion: NonNullable<ServerProviderModel["fusion"]>;
+  readonly capabilities: ModelCapabilities | null | undefined;
+  readonly selections?: ReadonlyArray<ProviderOptionSelection> | null | undefined;
+}): string {
+  const parts = [`${input.fusion.lead.name} + ${input.fusion.sidekick.name}`];
+  if (!input.capabilities) return parts[0]!;
+
+  const descriptors = getProviderOptionDescriptors({
+    caps: input.capabilities,
+    selections: input.selections,
+  });
+  const reasoning = descriptors.find((descriptor) => descriptor.id === "reasoningEffort");
+  const reasoningLabel = getProviderOptionCurrentLabel(reasoning);
+  if (reasoningLabel) parts.push(reasoningLabel);
+
+  const fastMode = descriptors.find((descriptor) => descriptor.id === "fastMode");
+  if (fastMode?.type === "boolean" && fastMode.currentValue === true) parts.push("Fast");
+
+  const contextWindow = descriptors.find((descriptor) => descriptor.id === "contextWindow");
+  const contextLabel = getProviderOptionCurrentLabel(contextWindow);
+  if (contextLabel && contextLabel !== "Standard") parts.push(contextLabel);
+
+  return parts.join(" · ");
 }
 
 export function buildProviderOptionSelectionsFromDescriptors(

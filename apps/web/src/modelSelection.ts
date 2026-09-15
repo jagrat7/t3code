@@ -5,6 +5,7 @@ import {
   DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
   type ModelSelection,
+  type ModelCapabilities,
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
@@ -91,6 +92,7 @@ export interface AppModelOption {
   isDefault?: boolean;
   isLegacy?: boolean;
   isUnavailable?: boolean;
+  capabilities?: ModelCapabilities | null;
 }
 
 function appendUnavailableDynamicModelSelection(
@@ -120,6 +122,7 @@ function toAppModelOption(model: ServerProvider["models"][number]): AppModelOpti
     slug: model.slug,
     name: model.name,
     isCustom: model.isCustom,
+    capabilities: model.capabilities,
   };
   if (model.shortName) option.shortName = model.shortName;
   if (model.fusion) option.fusion = model.fusion;
@@ -215,7 +218,12 @@ function getAppModelOptions(
     }
 
     seen.add(entry.slug);
-    options.push({ slug: entry.slug, name: entry.name, isCustom: true });
+    options.push({
+      slug: entry.slug,
+      name: entry.name,
+      isCustom: true,
+      capabilities: entry.capabilities,
+    });
   }
 
   const preferences = readInstanceModelPreferences(settings, defaultInstanceId);
@@ -266,7 +274,12 @@ export function getAppModelOptionsForInstance(
     }
 
     seen.add(custom.slug);
-    options.push({ slug: custom.slug, name: custom.name, isCustom: true });
+    options.push({
+      slug: custom.slug,
+      name: custom.name,
+      isCustom: true,
+      capabilities: custom.capabilities,
+    });
   }
 
   const preferences = readInstanceModelPreferences(settings, entry.instanceId);

@@ -27,6 +27,7 @@ import type {
   PreviewAnnotationPayload,
   ProviderApprovalDecision,
   ProviderInteractionMode,
+  ProviderOptionSelection,
   ResolvedKeybindingsConfig,
   RuntimeMode,
   ScopedThreadRef,
@@ -1468,7 +1469,7 @@ export interface ChatComposerProps {
   onProviderModelSelect: (
     instanceId: ProviderInstanceId,
     model: string,
-    options?: { focusComposer?: boolean },
+    options?: { focusComposer?: boolean; modelOptions?: ReadonlyArray<ProviderOptionSelection> },
   ) => void;
   onOpenProviderSetup: (instanceId: ProviderInstanceId) => void;
   getModelDisabledReason: (instanceId: ProviderInstanceId, model: string) => string | null;
@@ -5066,6 +5067,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             ? (activeThreadModelSelection?.model ?? selectedModelForPickerWithCustomFallback)
             : selectedModelForPickerWithCustomFallback
         }
+        activeModelOptions={composerModelOptions?.[selectedInstanceId]}
         lockedProvider={lockedProvider}
         lockedContinuationGroupKey={lockedContinuationGroupKey}
         instanceEntries={providerInstanceEntries}
@@ -5095,9 +5097,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           : {})}
         onOpenChange={setIsComposerModelPickerOpen}
         getModelDisabledReason={getModelDisabledReason}
-        onInstanceModelChange={(instanceId, model) => {
+        onInstanceModelChange={(instanceId, model, modelOptions) => {
           setMultipleModelSelections(null);
-          onProviderModelSelect(instanceId, model);
+          onProviderModelSelect(instanceId, model, modelOptions ? { modelOptions } : undefined);
         }}
         onOpenProviderSetup={onOpenProviderSetup}
       />

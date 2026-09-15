@@ -3,17 +3,22 @@ import { Pressable, ScrollView, View } from "react-native";
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import type { ModelOption } from "../../lib/modelOptions";
-import { fusionLeadPairing } from "./fusion-model-options";
+import type { ProviderOptionSelection } from "@t3tools/contracts";
+import { fusionLeadPairing, fusionOptionWithSelections } from "./fusion-model-options";
 
 export function FusionModelEditor(props: {
   readonly models: ReadonlyArray<ModelOption>;
   readonly initialKey: string;
+  readonly initialOptions?: ReadonlyArray<ProviderOptionSelection> | undefined;
   readonly onSelect: (model: ModelOption) => void;
 }) {
   const [selectedKey, setSelectedKey] = useState(props.initialKey);
   const [editing, setEditing] = useState<"lead" | "sidekick" | null>(null);
   const available = props.models.filter((model) => model.fusion && !model.isUnavailable);
-  const selected = available.find((model) => model.key === selectedKey) ?? available[0];
+  const selectedModel = available.find((model) => model.key === selectedKey) ?? available[0];
+  const selected = selectedModel
+    ? fusionOptionWithSelections(selectedModel, props.initialOptions)
+    : undefined;
   if (!selected?.fusion) {
     return <Text className="p-4 text-foreground-muted">No Fusion pairings available.</Text>;
   }
@@ -38,6 +43,7 @@ export function FusionModelEditor(props: {
         <Text className="text-sm text-foreground-muted">
           Choose a lead model and a sidekick to work together.
         </Text>
+        <Text className="text-sm text-foreground">{selected.subtitle}</Text>
       </View>
       <View className="gap-4">
         {(["lead", "sidekick"] as const).map((role) => (

@@ -1,10 +1,12 @@
 import { useId, useState } from "react";
 import { ArrowLeftIcon } from "lucide-react";
+import type { ProviderOptionSelection } from "@t3tools/contracts";
+import { getFusionSelectionSummary } from "@t3tools/shared/model";
 import { Button } from "../ui/button";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { DevinIcon } from "../Icons";
 import { composerFloatingLayerProps } from "./composerEventScope";
-import { findFusionLeadPairing } from "./fusionModelPicker";
+import { findFusionLeadPairing, fusionOptionsForModel } from "./fusionModelPicker";
 import { FusionWave } from "./FusionWave";
 import type { ModelEsque } from "./providerIconUtils";
 
@@ -12,8 +14,9 @@ export function FusionModelPicker(props: {
   models: ReadonlyArray<ModelEsque>;
   model: string;
   providerName: string;
+  modelOptions?: ReadonlyArray<ProviderOptionSelection> | undefined;
   onBack: () => void;
-  onSelect: (model: string) => void;
+  onSelect: (model: string, options?: ReadonlyArray<ProviderOptionSelection>) => void;
 }) {
   const leadLabelId = useId();
   const sidekickLabelId = useId();
@@ -44,6 +47,15 @@ export function FusionModelPicker(props: {
             <DevinIcon className="size-3.5 shrink-0" />
             <span className="truncate">{props.providerName}</span>
           </div>
+          {pairing ? (
+            <p className="max-w-40 text-xs text-muted-foreground">
+              {getFusionSelectionSummary({
+                fusion: pairing,
+                capabilities: selected.capabilities,
+                selections: props.modelOptions,
+              })}
+            </p>
+          ) : null}
         </div>
         {pairing ? (
           <div className="relative grid min-h-36 min-w-0 grid-cols-2 items-center gap-1 pr-12 pl-1 sm:gap-4 sm:pr-14 sm:pl-3">
@@ -124,7 +136,8 @@ export function FusionModelPicker(props: {
           size="sm"
           disabled={!selected}
           onClick={() => {
-            if (selected) props.onSelect(selected.slug);
+            if (selected)
+              props.onSelect(selected.slug, fusionOptionsForModel(selected, props.modelOptions));
           }}
         >
           Use Fusion

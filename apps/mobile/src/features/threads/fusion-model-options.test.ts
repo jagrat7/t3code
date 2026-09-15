@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 import { ProviderInstanceId } from "@t3tools/contracts";
 import type { ModelOption } from "../../lib/modelOptions";
-import { collapseFusionOptions, fusionLeadPairing } from "./fusion-model-options";
+import {
+  collapseFusionOptions,
+  fusionLeadPairing,
+  fusionOptionWithSelections,
+} from "./fusion-model-options";
 
 function pairing(provider: string, lead: string, sidekick: string): ModelOption {
   return {
@@ -31,6 +35,37 @@ describe("mobile Fusion pairing selection", () => {
     expect(
       collapseFusionOptions([first, selected, otherAccount, unavailable], (m) => m === selected),
     ).toEqual([selected, otherAccount, unavailable]);
+  });
+
+  it("carries supported traits to a new pairing and updates its summary", () => {
+    const model = {
+      ...pairing("a", "Opus", "SWE"),
+      capabilities: {
+        optionDescriptors: [
+          {
+            id: "reasoningEffort",
+            label: "Thinking level",
+            type: "select" as const,
+            currentValue: "medium",
+            options: [
+              { id: "medium", label: "Medium" },
+              { id: "high", label: "High" },
+            ],
+          },
+          { id: "fastMode", label: "Fast mode", type: "boolean" as const, currentValue: false },
+        ],
+      },
+    };
+    const next = fusionOptionWithSelections(model, [
+      { id: "reasoningEffort", value: "high" },
+      { id: "fastMode", value: true },
+      { id: "contextWindow", value: "removed" },
+    ]);
+    expect(next.selection.options).toEqual([
+      { id: "reasoningEffort", value: "high" },
+      { id: "fastMode", value: true },
+    ]);
+    expect(next.subtitle).toBe("Opus + SWE · High · Fast");
   });
 
   it("preserves the sidekick when changing leads, falling back only to an offered pairing", () => {

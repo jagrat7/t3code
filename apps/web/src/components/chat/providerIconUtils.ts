@@ -1,4 +1,8 @@
-import { ProviderDriverKind, type ServerProviderModel } from "@t3tools/contracts";
+import {
+  type ModelCapabilities,
+  ProviderDriverKind,
+  type ServerProviderModel,
+} from "@t3tools/contracts";
 import {
   AntigravityIcon,
   ClaudeAI,
@@ -32,6 +36,7 @@ export type ModelEsque = {
   badge?: "new" | undefined;
   isLegacy?: boolean | undefined;
   isUnavailable?: boolean | undefined;
+  capabilities?: ModelCapabilities | null | undefined;
 };
 
 function escapeRegExp(value: string): string {
