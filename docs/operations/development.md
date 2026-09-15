@@ -140,6 +140,16 @@ vp run dist:desktop:linux
 vp run dist:desktop:win
 ```
 
+Build the isolated `t3code+devin` AppImage with:
+
+```sh
+vp run dist:desktop:linux:devin
+```
+
+This distribution uses its own application ID, URL scheme, desktop entry, Electron profile, and
+`~/.t3code-devin` server state. It ignores `T3CODE_HOME`; set `T3CODE_DEVIN_HOME` only when the
+custom distribution needs a different state root. It has no automatic update feed.
+
 DMGs default to the host architecture. Use `--arch` to choose another target and `--keep-stage`
 to retain packaging files for inspection. Run `vp run dist:desktop:artifact --help` for other
 options.

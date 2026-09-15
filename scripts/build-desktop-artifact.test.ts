@@ -368,6 +368,54 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     ),
   );
 
+  it.effect("packages the Devin distribution with an isolated identity and no update feed", () =>
+    Effect.gen(function* () {
+      const config = yield* createBuildConfig(
+        "linux",
+        "AppImage",
+        "0.0.40",
+        false,
+        false,
+        undefined,
+        undefined,
+        false,
+        "x64",
+        "devin",
+      );
+
+      assert.equal(config.appId, "io.github.jagrat7.t3codedevin");
+      assert.equal(config.productName, "t3code+devin");
+      assert.equal(config.artifactName, "t3code-devin-${version}-${arch}.${ext}");
+      assert.equal(resolveDesktopProductName("0.0.40", "devin"), "t3code+devin");
+      assert.equal(resolveDesktopWebAssetBrand("0.0.40", "devin"), "nightly");
+      assert.deepStrictEqual(resolveDesktopBuildIconAssets("0.0.40", "devin"), {
+        macIconPng: BRAND_ASSET_PATHS.nightlyMacIconPng,
+        linuxIconPng: BRAND_ASSET_PATHS.nightlyLinuxIconPng,
+        windowsIconIco: BRAND_ASSET_PATHS.nightlyWindowsIconIco,
+      });
+      assert.notProperty(config, "publish");
+      assert.deepStrictEqual(config.linux, {
+        target: ["AppImage"],
+        executableName: "t3code-devin",
+        icon: "icons",
+        category: "Development",
+        protocols: [
+          {
+            name: "t3code+devin",
+            schemes: ["t3code-devin", "t3code-devin-dev"],
+          },
+        ],
+        desktop: { entry: { StartupWMClass: "t3code-devin" } },
+      });
+    }).pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({ env: { GITHUB_REPOSITORY: "pingdotgg/t3code" } }),
+        ),
+      ),
+    ),
+  );
+
   it("stages only the desktop main-process externals", () => {
     assert.deepStrictEqual(
       resolveDesktopRuntimeDependencies(
