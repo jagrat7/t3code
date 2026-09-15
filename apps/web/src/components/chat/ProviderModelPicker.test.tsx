@@ -3,6 +3,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
+  type ProviderOptionSelection,
 } from "@t3tools/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
@@ -33,6 +34,7 @@ function renderPicker(input: {
   driver: string;
   model: string;
   options: ReadonlyArray<ModelEsque>;
+  activeModelOptions?: ReadonlyArray<ProviderOptionSelection>;
   includeEntry?: boolean;
   triggerLabel?: string;
 }) {
@@ -42,6 +44,7 @@ function renderPicker(input: {
     <ProviderModelPicker
       activeInstanceId={instanceId}
       model={input.model}
+      activeModelOptions={input.activeModelOptions}
       lockedProvider={null}
       instanceEntries={input.includeEntry === false ? [] : [entry]}
       modelOptionsByInstance={new Map([[instanceId, input.options]])}
@@ -142,6 +145,39 @@ describe("ProviderModelPicker", () => {
 
     expect(markup).toContain("Selected model");
     expect(markup).not.toContain("Fallback model");
+  });
+
+  it("keeps reasoning out of the Fusion label because it has a separate control", () => {
+    const markup = renderPicker({
+      instanceId: "devin",
+      driver: "devin",
+      model: "fusion/gpt-5.6-sol/swe-2-high",
+      options: [
+        {
+          slug: "fusion/gpt-5.6-sol/swe-2-high",
+          name: "Fusion",
+          fusion: {
+            lead: { id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+            sidekick: { id: "swe-2-high", name: "SWE-2 High" },
+          },
+          capabilities: {
+            optionDescriptors: [
+              {
+                id: "reasoningEffort",
+                label: "Thinking level",
+                type: "select",
+                currentValue: "high",
+                options: [{ id: "high", label: "High" }],
+              },
+            ],
+          },
+        },
+      ],
+      activeModelOptions: [{ id: "reasoningEffort", value: "high" }],
+    });
+
+    expect(markup).toContain("Fusion · GPT-5.6 Sol + SWE-2 High");
+    expect(markup).not.toContain("SWE-2 High · High");
   });
 
   it("uses the first option when the active instance entry is missing", () => {
