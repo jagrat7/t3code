@@ -3914,18 +3914,16 @@ export default function ChatView(props: ChatViewProps) {
 
   const interruptContextRef = useRef({ activeThread, phase, setThreadError });
   interruptContextRef.current = { activeThread, phase, setThreadError };
-  const restoreQueuedMessagesRef = useRef<(messages: ReadonlyArray<QueuedComposerMessage>) => void>(
-    () => {},
-  );
   const onInterrupt = useCallback(async () => {
     const { activeThread, phase, setThreadError } = interruptContextRef.current;
     const input = buildRunningThreadTurnInterruptInput(activeThread, phase);
     if (!input || !activeThread) return;
-    restoreQueuedMessagesRef.current(
-      useQueuedMessageStore
-        .getState()
-        .drain(scopedThreadKey(scopeThreadRef(activeThread.environmentId, activeThread.id))),
-    );
+    // Stop keeps the queue: every message is held in place and waits for an
+    // explicit Send now instead of dispatching into the interrupted turn or
+    // being folded back into the composer.
+    useQueuedMessageStore
+      .getState()
+      .holdAll(scopedThreadKey(scopeThreadRef(activeThread.environmentId, activeThread.id)));
     const result = await interruptThreadTurn({
       environmentId: activeThread.environmentId,
       input,
@@ -7639,10 +7637,13 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
     }
-    // Stop drains the queue. A queued send whose upload was still running at
-    // that moment must not start a turn afterwards; it checks this before
-    // dispatch and hands the message back to the composer instead.
-    const drainGenerationAtTake = useQueuedMessageStore.getState().drainGeneration;
+    // Stop and Clear all reset the queue. A queued send whose upload was
+    // still running at that moment must not start a turn afterwards; it
+    // checks this before dispatch and puts the message back where the reset
+    // left the queue.
+    const queueResetGenerationAtTake = activeThreadKey
+      ? (useQueuedMessageStore.getState().queueResetsByThreadKey[activeThreadKey]?.generation ?? 0)
+      : 0;
     // A queued send that fails goes back to the head of the queue, held. The
     // messages behind it keep their order and wait; the composer is not
     // touched, which also keeps a failure after navigation off the new
@@ -7687,13 +7688,17 @@ export default function ChatView(props: ChatViewProps) {
       }
     }
 
-    if (
-      queuedMessage &&
-      useQueuedMessageStore.getState().drainGeneration !== drainGenerationAtTake
-    ) {
-      sendInFlightRef.current = false;
-      restoreQueuedMessagesToComposer([queuedMessage]);
-      return;
+    if (queuedMessage && activeThreadKey) {
+      const queueReset = useQueuedMessageStore.getState().queueResetsByThreadKey[activeThreadKey];
+      if (queueReset && queueReset.generation !== queueResetGenerationAtTake) {
+        sendInFlightRef.current = false;
+        if (queueReset.keptInQueue) {
+          useQueuedMessageStore.getState().holdAtFront(activeThreadKey, queuedMessage);
+        } else {
+          restoreQueuedMessagesToComposer([queuedMessage]);
+        }
+        return;
+      }
     }
 
     const resolvedSubmissionIntent =
@@ -8259,9 +8264,6 @@ export default function ChatView(props: ChatViewProps) {
   const onClearQueuedMessages = useCallback(() => {
     queuedMessageActionsRef.current.clearAll();
   }, []);
-  // Stop also cancels the queue: the messages return to the composer instead
-  // of starting a new turn the moment the interrupted one settles.
-  restoreQueuedMessagesRef.current = restoreQueuedMessagesToComposer;
 
   const onRespondToApproval = useCallback(
     async (requestId: ApprovalRequestId, decision: ProviderApprovalDecision) => {

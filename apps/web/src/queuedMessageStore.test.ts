@@ -23,7 +23,7 @@ function makeMessage(prompt: string): Omit<QueuedComposerMessage, "id"> {
 
 describe("queuedMessageStore", () => {
   beforeEach(() => {
-    useQueuedMessageStore.setState({ queuesByThreadKey: {}, drainGeneration: 0 });
+    useQueuedMessageStore.setState({ queuesByThreadKey: {}, queueResetsByThreadKey: {} });
   });
 
   it("keeps messages in submission order per thread", () => {
@@ -93,10 +93,68 @@ describe("queuedMessageStore", () => {
     enqueue("thread-b", makeMessage("other"));
 
     expect(drain("thread-a").map((message) => message.prompt)).toEqual(["first", "second"]);
-    expect(useQueuedMessageStore.getState().drainGeneration).toBe(1);
-    expect(drain("thread-a")).toEqual([]);
-    expect(useQueuedMessageStore.getState().drainGeneration).toBe(1);
+    expect(useQueuedMessageStore.getState().queueResetsByThreadKey["thread-a"]).toEqual({
+      generation: 1,
+      keptInQueue: false,
+    });
     expect(useQueuedMessageStore.getState().queuesByThreadKey["thread-b"]).toHaveLength(1);
+    expect(useQueuedMessageStore.getState().queueResetsByThreadKey["thread-b"]).toBeUndefined();
+  });
+
+  it("drain bumps the reset generation even when the queue is already empty", () => {
+    const { enqueue, take, drain } = useQueuedMessageStore.getState();
+    const only = enqueue("thread-a", makeMessage("first"));
+    take("thread-a", only.id, "t1");
+
+    expect(drain("thread-a")).toEqual([]);
+    expect(useQueuedMessageStore.getState().queueResetsByThreadKey["thread-a"]?.generation).toBe(1);
+  });
+
+  it("holdAll keeps the queue in order but held back from auto-dispatch", () => {
+    const { enqueue, holdAll } = useQueuedMessageStore.getState();
+    enqueue("thread-a", makeMessage("first"));
+    enqueue("thread-a", makeMessage("second"));
+
+    holdAll("thread-a");
+
+    const queue = useQueuedMessageStore.getState().queuesByThreadKey["thread-a"] ?? [];
+    expect(queue.map((message) => message.prompt)).toEqual(["first", "second"]);
+    expect(queue.every((message) => message.holdUntilUserAction === true)).toBe(true);
+    expect(
+      isQueuedMessageDue({ message: queue[0]!, phase: "ready", latestToolActivityId: null }),
+    ).toBe(false);
+    expect(useQueuedMessageStore.getState().queueResetsByThreadKey["thread-a"]).toEqual({
+      generation: 1,
+      keptInQueue: true,
+    });
+  });
+
+  it("holdAll bumps the generation on an empty queue so an in-flight send still cancels", () => {
+    const { enqueue, take, holdAll } = useQueuedMessageStore.getState();
+    const only = enqueue("thread-a", makeMessage("first"));
+    take("thread-a", only.id, "t1");
+
+    holdAll("thread-a");
+
+    expect(useQueuedMessageStore.getState().queueResetsByThreadKey["thread-a"]?.generation).toBe(1);
+  });
+
+  it("holdAll and drain only reset their own thread", () => {
+    const { enqueue, holdAll, drain } = useQueuedMessageStore.getState();
+    enqueue("thread-a", makeMessage("first"));
+    enqueue("thread-b", makeMessage("other"));
+
+    holdAll("thread-a");
+    drain("thread-b");
+
+    expect(useQueuedMessageStore.getState().queueResetsByThreadKey["thread-a"]).toEqual({
+      generation: 1,
+      keptInQueue: true,
+    });
+    expect(useQueuedMessageStore.getState().queueResetsByThreadKey["thread-b"]).toEqual({
+      generation: 1,
+      keptInQueue: false,
+    });
   });
 });
 

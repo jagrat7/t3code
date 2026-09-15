@@ -35,8 +35,9 @@ A message sent during a running turn waits in a queue above the composer. It
 goes out on its own when the agent finishes its next tool call, or when the
 turn ends. Press Enter again in the now-empty composer to send the first
 queued message right away. The queue can also send a message now, move it
-back into the composer to edit, or remove it. Stop returns every queued
-message to the composer.
+back into the composer to edit, or remove it. Stop keeps queued messages in
+place as held items — each waits for Send now or Enter instead of sending
+on its own.
 
 ## Queue messages offline on mobile
 

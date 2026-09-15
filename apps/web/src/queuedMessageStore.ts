@@ -28,8 +28,8 @@ export interface QueuedComposerMessage {
    */
   queuedAfterToolActivityId: string | null;
   /**
-   * Set when the message was created by Stop or a failed restore, not by the
-   * user pressing send. It waits for Send now instead of leaving on its own.
+   * Set by Stop or a failed send restore, not by the user pressing send. It
+   * waits for Send now instead of leaving on its own.
    */
   holdUntilUserAction?: boolean;
   createdAt: string;
@@ -38,11 +38,14 @@ export interface QueuedComposerMessage {
 interface QueuedMessageStoreState {
   queuesByThreadKey: Record<string, QueuedComposerMessage[]>;
   /**
-   * Bumped by `drain`. A send that took a message before a drain and finishes
-   * its upload after it compares this to the value it captured and gives up,
-   * so Stop cannot be followed by a queued message starting a new turn.
+   * Per-thread reset marker, bumped by `drain` (Clear all) and `holdAll`
+   * (Stop). A send that took a message before the reset and finishes its
+   * upload after it compares the generation and gives up instead of
+   * dispatching. `keptInQueue` says where the orphaned message belongs:
+   * Stop parked the queue, so it re-enters held at the front; Clear all
+   * discarded the queue, so its content is restored to the composer.
    */
-  drainGeneration: number;
+  queueResetsByThreadKey: Record<string, { generation: number; keptInQueue: boolean }>;
   enqueue: (threadKey: string, message: Omit<QueuedComposerMessage, "id">) => QueuedComposerMessage;
   /**
    * Removes one message and returns it, or null when another caller already
@@ -61,6 +64,11 @@ interface QueuedMessageStoreState {
    * send failed: the queue keeps its order and nothing behind it overtakes.
    */
   holdAtFront: (threadKey: string, message: QueuedComposerMessage) => void;
+  /**
+   * Stop's half of the queue: every message stays queued but held, so it
+   * waits for Send now rather than auto-dispatching into an idle turn.
+   */
+  holdAll: (threadKey: string) => void;
   /** Removes and returns every queued message for the thread, oldest first. */
   drain: (threadKey: string) => QueuedComposerMessage[];
 }
@@ -70,7 +78,7 @@ const EMPTY_QUEUE: QueuedComposerMessage[] = [];
 /** In-memory only: a queued message is a live intent, not a draft worth persisting. */
 export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get) => ({
   queuesByThreadKey: {},
-  drainGeneration: 0,
+  queueResetsByThreadKey: {},
   enqueue: (threadKey, message) => {
     const entry: QueuedComposerMessage = { ...message, id: randomUUID() };
     set((state) => ({
@@ -138,17 +146,39 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
       };
     });
   },
+  holdAll: (threadKey) => {
+    set((state) => {
+      const queue = state.queuesByThreadKey[threadKey];
+      const reset = state.queueResetsByThreadKey[threadKey];
+      return {
+        queuesByThreadKey: queue?.length
+          ? {
+              ...state.queuesByThreadKey,
+              [threadKey]: queue.map((entry) => ({ ...entry, holdUntilUserAction: true })),
+            }
+          : state.queuesByThreadKey,
+        queueResetsByThreadKey: {
+          ...state.queueResetsByThreadKey,
+          [threadKey]: { generation: (reset?.generation ?? 0) + 1, keptInQueue: true },
+        },
+      };
+    });
+  },
   drain: (threadKey) => {
     const queue = get().queuesByThreadKey[threadKey];
-    if (!queue || queue.length === 0) {
-      return EMPTY_QUEUE;
-    }
     set((state) => {
       const queuesByThreadKey = { ...state.queuesByThreadKey };
       delete queuesByThreadKey[threadKey];
-      return { queuesByThreadKey, drainGeneration: state.drainGeneration + 1 };
+      const reset = state.queueResetsByThreadKey[threadKey];
+      return {
+        queuesByThreadKey,
+        queueResetsByThreadKey: {
+          ...state.queueResetsByThreadKey,
+          [threadKey]: { generation: (reset?.generation ?? 0) + 1, keptInQueue: false },
+        },
+      };
     });
-    return queue;
+    return queue ?? EMPTY_QUEUE;
   },
 }));
 
