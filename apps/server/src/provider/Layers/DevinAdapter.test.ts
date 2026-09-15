@@ -33,6 +33,7 @@ import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeDevinAdapter } from "./DevinAdapter.ts";
+import { DevinSkillCatalog } from "../Drivers/DevinSkills.ts";
 import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 const decodeDevinSettings = Schema.decodeSync(DevinSettings);
@@ -73,7 +74,22 @@ const modelsListStubSource = [
   '  process.stdout.write(catalog + "\\n");',
   "  process.exit(0);",
   "}",
+  'if (process.argv[2] === "skills") {',
+  '  process.stdout.write((process.env.T3_DEVIN_SKILLS_JSON ?? "[]") + "\\n");',
+  "  process.exit(0);",
+  "}",
 ].join("\n");
+
+const DISPATCH_TEST_SKILLS_JSON = Schema.encodeSync(DevinSkillCatalog)([
+  {
+    name: "check",
+    display_name: "check",
+    description: "Check a page.",
+    base_dir: "/skills/check",
+    triggers: ["user"],
+    errors: [],
+  },
+]);
 
 async function makeMockAgentWrapper(
   extraEnv?: Record<string, string>,
@@ -416,6 +432,108 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
         [
           [
             { type: "text", text: "hello devin" },
+            { type: "text", text: buildRuntimeInstructions({ harness: "Devin" }) },
+          ],
+        ],
+      );
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("dispatches a $skill mention as a leading slash command", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("devin-skill-dispatch-thread");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-skill-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const argvLogPath = NodePath.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath, {
+          T3_DEVIN_SKILLS_JSON: DISPATCH_TEST_SKILLS_JSON,
+        }),
+      );
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: tempDir,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "please $check the page",
+        attachments: [],
+      });
+
+      const requests = yield* waitForJsonLogMatch(
+        requestLogPath,
+        (entry) => entry.method === "session/prompt",
+      );
+      const promptRequests = requests.filter((entry) => entry.method === "session/prompt");
+      assert.deepStrictEqual(
+        promptRequests.map(
+          (request) => (request.params as Record<string, unknown> | undefined)?.prompt,
+        ),
+        [
+          [
+            { type: "text", text: "/check please  the page" },
+            { type: "text", text: buildRuntimeInstructions({ harness: "Devin" }) },
+          ],
+        ],
+      );
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("keeps an unknown $skill mention literal in the prompt", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("devin-unknown-skill-thread");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-noskill-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const argvLogPath = NodePath.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath),
+      );
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: tempDir,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "check $not-a-skill here",
+        attachments: [],
+      });
+
+      const requests = yield* waitForJsonLogMatch(
+        requestLogPath,
+        (entry) => entry.method === "session/prompt",
+      );
+      const promptRequests = requests.filter((entry) => entry.method === "session/prompt");
+      assert.deepStrictEqual(
+        promptRequests.map(
+          (request) => (request.params as Record<string, unknown> | undefined)?.prompt,
+        ),
+        [
+          [
+            { type: "text", text: "check $not-a-skill here" },
             { type: "text", text: buildRuntimeInstructions({ harness: "Devin" }) },
           ],
         ],
