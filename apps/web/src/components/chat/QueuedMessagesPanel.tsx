@@ -1,5 +1,5 @@
 import { ChevronDownIcon, PencilIcon, Trash2Icon } from "lucide-react";
-import { useState } from "react";
+import { memo, useState } from "react";
 
 import { cn } from "~/lib/utils";
 import type { QueuedComposerMessage } from "../../queuedMessageStore";
@@ -13,7 +13,7 @@ import { ComposerBanner } from "./ComposerBanner";
  * Rows mirror Zed's queue: a status dot, the message, then discard / edit /
  * Send now actions. Editing moves the message back into the composer.
  */
-export function QueuedMessagesPanel({
+export const QueuedMessagesPanel = memo(function QueuedMessagesPanel({
   messages,
   showEnterToSendHint,
   onSendNow,
@@ -87,7 +87,7 @@ export function QueuedMessagesPanel({
       </ComposerBanner.Root>
     </ComposerBanner.Attachment>
   );
-}
+});
 
 function QueuedMessageRow({
   message,
