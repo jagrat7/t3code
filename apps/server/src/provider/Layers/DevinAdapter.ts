@@ -73,7 +73,13 @@ import {
   parsePermissionRequest,
 } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
-import { type DevinAcpRuntime, makeDevinAcpRuntime } from "../acp/DevinAcpSupport.ts";
+import {
+  type DevinAcpRuntime,
+  devinSupportsMcpExtension,
+  makeDevinAcpRuntime,
+  prepareDevinMcp,
+} from "../acp/DevinAcpSupport.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { prepareDevinSkillPrompt } from "../Drivers/DevinSkills.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import type { ProviderAdapterError } from "../Errors.ts";
@@ -605,16 +611,50 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             ? yield* options.resolveSettings
             : devinSettings;
 
+          // ProviderService issues the T3 Code MCP credential before
+          // startSession and revokes it on stop; the adapter only sees the
+          // already-scoped config. Devin resolves MCP tools from
+          // `.devin/mcp_config.local.json` inside a session root, so the
+          // credential is written to a session-scoped directory declared as
+          // an additional workspace root rather than sent to the client.
+          const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+          const environment = mcpSession?.agentDeviceEnvironment
+            ? McpProviderSession.withAgentDeviceEnvironment(
+                options?.environment ?? process.env,
+                mcpSession,
+              )
+            : options?.environment;
+          const mcpConfig =
+            mcpSession === undefined
+              ? undefined
+              : yield* prepareDevinMcp(mcpSession).pipe(
+                  Effect.provideService(FileSystem.FileSystem, fileSystem),
+                  Effect.provideService(Path.Path, path),
+                  Effect.provideService(Scope.Scope, sessionScope),
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderAdapterProcessError({
+                        provider: PROVIDER,
+                        threadId: input.threadId,
+                        detail: "Could not prepare the T3 Code MCP configuration for Devin.",
+                        cause,
+                      }),
+                  ),
+                );
+
           const acp = yield* makeDevinAcpRuntime({
             devinSettings: effectiveDevinSettings,
-            ...(options?.environment !== undefined ? { environment: options.environment } : {}),
+            ...(environment !== undefined ? { environment } : {}),
             childProcessSpawner,
             cwd,
             // The attachment store lives outside the project cwd. Declaring
             // it as a workspace root keeps the ProviderService path line
             // dereferenceable in Devin modes that restrict filesystem
             // access outside the workspace (same as Antigravity).
-            additionalDirectories: [serverConfig.attachmentsDir],
+            additionalDirectories: [
+              serverConfig.attachmentsDir,
+              ...(mcpConfig !== undefined ? [mcpConfig.directory] : []),
+            ],
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "t3-code", version: "0.0.0" },
             ...acpNativeLoggers,
@@ -709,6 +749,29 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
               mapAcpToAdapterError(PROVIDER, input.threadId, "session/start", error),
             ),
           );
+
+          if (mcpConfig !== undefined) {
+            if (devinSupportsMcpExtension(started.initializeResult)) {
+              yield* mcpConfig
+                .connect(acp)
+                .pipe(
+                  Effect.mapError((cause) =>
+                    mapAcpToAdapterError(
+                      PROVIDER,
+                      input.threadId,
+                      "_cognition.ai/mcp/connectServer",
+                      cause,
+                    ),
+                  ),
+                );
+            } else {
+              // Older CLIs do not understand the extension; the session
+              // still works, just without T3 Code tools.
+              yield* Effect.logWarning(
+                "Devin CLI does not advertise MCP support; T3 Code tools are unavailable for this session.",
+              );
+            }
+          }
 
           const devinModelSelection =
             input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
