@@ -25,6 +25,10 @@ export function FusionModelPicker(props: {
   );
   const selected = props.models.find((model) => model.slug === selectedSlug);
   const pairing = selected?.fusion;
+  const selectPairing = (model: ModelEsque) => {
+    setSelectedSlug(model.slug);
+    props.onSelect(model.slug, fusionOptionsForModel(model, props.modelOptions));
+  };
   const leads = [
     ...new Map(
       props.models.flatMap((model) =>
@@ -66,7 +70,7 @@ export function FusionModelPicker(props: {
                 onValueChange={(leadId) => {
                   if (!leadId) return;
                   const next = findFusionLeadPairing(props.models, leadId, pairing.sidekick.id);
-                  if (next) setSelectedSlug(next.slug);
+                  if (next) selectPairing(next);
                 }}
               >
                 <SelectTrigger
@@ -92,7 +96,8 @@ export function FusionModelPicker(props: {
               <Select
                 value={selectedSlug}
                 onValueChange={(slug) => {
-                  if (slug) setSelectedSlug(slug);
+                  const next = props.models.find((model) => model.slug === slug);
+                  if (next) selectPairing(next);
                 }}
               >
                 <SelectTrigger
@@ -121,7 +126,7 @@ export function FusionModelPicker(props: {
           </p>
         )}
       </div>
-      <footer className="flex items-center justify-between border-t border-border/70 px-3 py-2.5">
+      <footer className="flex items-center border-t border-border/70 px-3 py-2.5">
         <Button
           size="sm"
           variant="ghost"
@@ -131,16 +136,6 @@ export function FusionModelPicker(props: {
         >
           <ArrowLeftIcon className="size-3.5" />
           Models
-        </Button>
-        <Button
-          size="sm"
-          disabled={!selected}
-          onClick={() => {
-            if (selected)
-              props.onSelect(selected.slug, fusionOptionsForModel(selected, props.modelOptions));
-          }}
-        >
-          Use Fusion
         </Button>
       </footer>
     </div>

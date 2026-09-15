@@ -8,6 +8,7 @@ import {
 } from "@t3tools/shared/usageLimits";
 import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { usageLimitsBannerItem } from "./chat/ComposerUsageLimits";
+import { isInsideComposerFloatingLayer } from "./chat/composerEventScope";
 import { derivePendingRequests } from "@t3tools/client-runtime/pending-requests";
 import {
   questionAttachmentDraftId,
@@ -3908,6 +3909,7 @@ export default function ChatView(props: ChatViewProps) {
   useEffect(() => subscribeSnapShotComposerFocus(focusComposer), [focusComposer]);
   const scheduleComposerFocus = useCallback(() => {
     window.requestAnimationFrame(() => {
+      if (isInsideComposerFloatingLayer(document.activeElement)) return;
       focusComposer();
     });
   }, [focusComposer]);

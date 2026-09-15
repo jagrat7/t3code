@@ -606,13 +606,12 @@ function ThreadSettingsModelListRow(props: {
   const session = useThreadSettingsSession();
   const navigation = useNavigation<NativeStackNavigationProp<ThreadSettingsPickerStackParams>>();
   const onPress = useCallback(() => {
+    session.pressModel(props.option);
     if (props.option.fusion && !props.option.isUnavailable) {
       navigation.navigate("ThreadSettingsFusion", {
         providerKey: props.option.providerKey,
         initialKey: props.option.key,
       });
-    } else {
-      session.pressModel(props.option);
     }
   }, [navigation, props.option, session]);
 
@@ -1216,7 +1215,6 @@ function ThreadSettingsModelsScreen() {
 
 function ThreadSettingsFusionScreen() {
   const session = useThreadSettingsSession();
-  const presentation = useThreadSettingsPickerPresentation();
   const navigation = useNavigation<NativeStackNavigationProp<ThreadSettingsPickerStackParams>>();
   const route = useRoute<RouteProp<ThreadSettingsPickerStackParams, "ThreadSettingsFusion">>();
   const models =
@@ -1236,14 +1234,7 @@ function ThreadSettingsFusionScreen() {
             ? session.pendingModel.selection.options
             : models.find((model) => model.key === route.params.initialKey)?.selection.options
         }
-        onSelect={(option) => {
-          const pending = session.pendingModel;
-          if (session.isApplied(option) && pending?.key !== option.key) {
-            presentation.onClose();
-          } else if (session.commitPendingModel(pending?.key === option.key ? pending : option)) {
-            presentation.onClose();
-          }
-        }}
+        onSelect={(option) => session.pressModel(option)}
       />
     </>
   );

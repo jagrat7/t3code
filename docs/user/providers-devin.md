@@ -13,10 +13,10 @@ Fast mode or the context window.
 ## Fusion
 
 [Fusion](https://docs.devin.ai/cli/fusion) requires Devin CLI 3000.10.20 or
-newer and an eligible paid plan. Choose **Fusion** in the model picker, select
-the lead and sidekick, then choose **Use Fusion**. The composer controls
-configure the selected lead's thinking level and Fast mode. You can switch back
-to a regular model in the same thread.
+newer and an eligible paid plan. Choose **Fusion** in the model picker to
+select it, then pick the lead and sidekick — changes apply right away. The
+composer controls configure the selected lead's thinking level and Fast mode.
+You can switch back to a regular model in the same thread.
 
 ## Skills and T3 Code tools
 
