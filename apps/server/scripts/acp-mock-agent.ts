@@ -591,6 +591,15 @@ const program = Effect.gen(function* () {
         currentModeId = request.value;
       }
       if (request.configId === "model" && typeof request.value === "string") {
+        if (advertisedModelIds && !advertisedModelIds.includes(request.value)) {
+          return yield* AcpError.AcpRequestError.invalidParams(
+            `Unknown mock model id: ${request.value}`,
+            {
+              method: "session/set_config_option",
+              params: request,
+            },
+          );
+        }
         currentModelId = request.value;
       }
       if (request.configId === "reasoning" && typeof request.value === "string") {

@@ -1,9 +1,11 @@
 import {
+  resolveProviderModelPolicy,
   type ModelCapabilities,
   type ProviderDriverKind,
   type ProviderInstanceId,
   type ProviderOptionSelection,
   type ScopedThreadRef,
+  type ServerProvider,
   type ServerProviderModel,
 } from "@t3tools/contracts";
 import {
@@ -24,6 +26,7 @@ import { shouldRenderTraitsControls, TraitsMenuContent, TraitsPicker } from "./T
 
 export type ComposerProviderStateInput = {
   provider: ProviderDriverKind;
+  modelPolicy?: ServerProvider["modelPolicy"];
   model: string;
   models: ReadonlyArray<ServerProviderModel>;
   promptInjectionState?: ComposerPromptInjectionState;
@@ -44,6 +47,7 @@ export type ComposerProviderState = {
 
 type TraitsRenderInput = {
   provider: ProviderDriverKind;
+  modelPolicy?: ServerProvider["modelPolicy"];
   instanceId?: ProviderInstanceId;
   threadRef?: ScopedThreadRef;
   draftId?: DraftId;
@@ -94,12 +98,21 @@ function resolveComposerOptionSelections(
   provider: ProviderDriverKind,
   modelOptions: ReadonlyArray<ProviderOptionSelection> | null | undefined,
   planModeEnabled: boolean,
+  modelPolicy: ServerProvider["modelPolicy"],
 ): {
   caps: ModelCapabilities;
   selections: ReadonlyArray<ProviderOptionSelection> | undefined;
 } {
   const caps = getProviderModelCapabilities(models, model, provider, planModeEnabled);
-  return { caps, selections: withImplicitFastModeDefault(caps, modelOptions) };
+  return {
+    caps,
+    // `exact` policies dispatch the persisted selections verbatim — no
+    // implicit fastMode default may be synthesized onto a family pick.
+    selections:
+      resolveProviderModelPolicy({ driver: provider, modelPolicy }).optionSelection === "exact"
+        ? (modelOptions ?? undefined)
+        : withImplicitFastModeDefault(caps, modelOptions),
+  };
 }
 
 export function getComposerProviderState(input: ComposerProviderStateInput): ComposerProviderState {
@@ -110,6 +123,7 @@ export function getComposerProviderState(input: ComposerProviderStateInput): Com
     modelOptions,
     promptInjectionState = "none",
     planModeEnabled,
+    modelPolicy,
   } = input;
   if (provider === "opencode") {
     const normalizedModel = normalizeModelSlug(model, provider);
@@ -132,8 +146,14 @@ export function getComposerProviderState(input: ComposerProviderStateInput): Com
     provider,
     modelOptions,
     planModeEnabled,
+    modelPolicy,
   );
-  const descriptors = getProviderOptionDescriptors({ caps, selections });
+  const descriptors = getProviderOptionDescriptors({
+    caps,
+    selections,
+    preserveUnavailableSelections:
+      resolveProviderModelPolicy({ driver: provider, modelPolicy }).optionSelection === "exact",
+  });
   const primarySelectDescriptor = descriptors.find(
     (descriptor): descriptor is Extract<(typeof descriptors)[number], { type: "select" }> =>
       descriptor.type === "select",
@@ -178,6 +198,7 @@ function renderTraitsControl(
     planModeEnabled,
     size,
     hidden,
+    modelPolicy,
     triggerVariant,
     triggerClassName,
     isComposerOwned,
@@ -189,11 +210,13 @@ function renderTraitsControl(
     provider,
     modelOptions,
     planModeEnabled,
+    modelPolicy,
   );
   if (
     !hasTarget ||
     !shouldRenderTraitsControls({
       provider,
+      modelPolicy,
       models,
       model,
       modelOptions: resolvedModelOptions,
@@ -206,6 +229,7 @@ function renderTraitsControl(
   return (
     <Component
       provider={provider}
+      modelPolicy={modelPolicy}
       {...(instanceId ? { instanceId } : {})}
       models={models}
       {...(threadRef ? { threadRef } : {})}

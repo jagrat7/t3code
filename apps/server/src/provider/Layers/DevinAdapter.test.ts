@@ -54,6 +54,27 @@ const mockAgentPath = NodePath.join(__dirname, "../../../scripts/acp-mock-agent.
 // Stopping a session kills the agent with SIGTERM; Windows terminates the
 // process instead, so the mock never sees a signal to log.
 const windowsHost = HostProcessPlatform.defaultValue() === "win32";
+// The adapter resolves model selections through `devin models list`. The
+// fake CLI answers it from `T3_DEVIN_MODELS_JSON` when set, else one
+// single-variant family per `T3_ACP_MODEL_IDS` entry (default `adaptive`),
+// and execs the ACP mock for anything else.
+const modelsListStubSource = [
+  'if (process.argv[2] === "models") {',
+  "  const catalog = process.env.T3_DEVIN_MODELS_JSON ?? JSON.stringify({",
+  '    families: (process.env.T3_ACP_MODEL_IDS ?? "adaptive")',
+  '      .split(",")',
+  "      .filter(Boolean)",
+  "      .map((id) => ({",
+  "        slug: id,",
+  "        family_label: id,",
+  "        variants: [{ model_uid: id, label: id }],",
+  "      })),",
+  "  });",
+  '  process.stdout.write(catalog + "\\n");',
+  "  process.exit(0);",
+  "}",
+].join("\n");
+
 async function makeMockAgentWrapper(
   extraEnv?: Record<string, string>,
   options?: { initialDelaySeconds?: number },
@@ -63,12 +84,15 @@ async function makeMockAgentWrapper(
     directory: dir,
     name: "fake-agent",
     env: extraEnv ?? {},
-    source: execScriptSource({
-      scriptPath: mockAgentPath,
-      ...(options?.initialDelaySeconds === undefined
-        ? {}
-        : { delayMs: Math.round(options.initialDelaySeconds * 1000) }),
-    }),
+    source: [
+      modelsListStubSource,
+      execScriptSource({
+        scriptPath: mockAgentPath,
+        ...(options?.initialDelaySeconds === undefined
+          ? {}
+          : { delayMs: Math.round(options.initialDelaySeconds * 1000) }),
+      }),
+    ].join("\n"),
   });
 }
 
@@ -82,7 +106,10 @@ async function makeProbeWrapper(
     directory: dir,
     name: "fake-agent",
     env: { T3_ACP_REQUEST_LOG_PATH: requestLogPath, ...extraEnv },
-    source: execScriptSource({ scriptPath: mockAgentPath, argvLogPath }),
+    source: [
+      modelsListStubSource,
+      execScriptSource({ scriptPath: mockAgentPath, argvLogPath }),
+    ].join("\n"),
   });
 }
 
@@ -1244,6 +1271,219 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
     }),
   );
 
+  // `devin models list` advertises families whose variants collapse into
+  // capability options; the adapter must resolve the selection against the
+  // live catalog and dispatch only the exact `model_uid`.
+  const FAMILY_MODELS_JSON = JSON.stringify({
+    families: [
+      {
+        slug: "opus",
+        family_label: "Opus",
+        variants: [
+          { model_uid: "opus-high", label: "Opus High" },
+          { model_uid: "opus-medium", label: "Opus Medium" },
+          { model_uid: "opus-high-fast", label: "Opus High Fast" },
+          { model_uid: "opus-medium-fast", label: "Opus Medium Fast" },
+        ],
+      },
+      {
+        slug: "swe",
+        family_label: "SWE",
+        variants: [{ model_uid: "native-swe", label: "SWE High" }],
+      },
+      {
+        slug: "fusion",
+        family_label: "Fusion",
+        variants: [
+          { model_uid: "pair-high", label: "Fusion (Opus High + SWE High)" },
+          { model_uid: "pair-medium", label: "Fusion (Opus Medium + SWE High)" },
+          { model_uid: "pair-high-fast", label: "Fusion (Opus High Fast + SWE High)" },
+          { model_uid: "pair-medium-fast", label: "Fusion (Opus Medium Fast + SWE High)" },
+        ],
+      },
+    ],
+  });
+  const FAMILY_MODEL_IDS =
+    "opus-high,opus-medium,opus-high-fast,opus-medium-fast,native-swe,pair-high,pair-medium,pair-high-fast,pair-medium-fast";
+
+  it.effect("resolves family selections with options to exact catalog model ids", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("devin-family-selection");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-family-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const argvLogPath = NodePath.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath, {
+          T3_ACP_MODEL_IDS: FAMILY_MODEL_IDS,
+          T3_DEVIN_MODELS_JSON: FAMILY_MODELS_JSON,
+        }),
+      );
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("devin"),
+          model: "opus",
+          options: [{ id: "reasoningEffort", value: "medium" }],
+        },
+      });
+      // The session records the resolved exact id, not the family slug.
+      assert.equal(session.model, "opus-medium");
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "switch to fast high",
+        attachments: [],
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("devin"),
+          model: "opus",
+          options: [
+            { id: "reasoningEffort", value: "high" },
+            { id: "fastMode", value: true },
+          ],
+        },
+      });
+
+      const requests = yield* waitForJsonLogMatch(
+        requestLogPath,
+        (entry) =>
+          entry.method === "session/set_config_option" &&
+          (entry.params as Record<string, unknown> | undefined)?.value === "opus-high-fast",
+      );
+      const modelValues = requests
+        .filter(
+          (entry) =>
+            entry.method === "session/set_config_option" &&
+            (entry.params as Record<string, unknown> | undefined)?.configId === "model",
+        )
+        .map((entry) => (entry.params as Record<string, unknown>).value);
+      assert.deepStrictEqual(modelValues, ["opus-medium", "opus-high-fast"]);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("resolves a Fusion family selection to the exact pairing id", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("devin-fusion-selection");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-fusion-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const argvLogPath = NodePath.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath, {
+          T3_ACP_MODEL_IDS: FAMILY_MODEL_IDS,
+          T3_DEVIN_MODELS_JSON: FAMILY_MODELS_JSON,
+        }),
+      );
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("devin"),
+          model: "fusion/opus/native-swe",
+          options: [
+            { id: "reasoningEffort", value: "medium" },
+            { id: "fastMode", value: true },
+          ],
+        },
+      });
+      assert.equal(session.model, "pair-medium-fast");
+
+      const requests = yield* waitForJsonLogMatch(
+        requestLogPath,
+        (entry) => entry.method === "session/set_config_option",
+      );
+      const modelValues = requests
+        .filter(
+          (entry) =>
+            entry.method === "session/set_config_option" &&
+            (entry.params as Record<string, unknown> | undefined)?.configId === "model",
+        )
+        .map((entry) => (entry.params as Record<string, unknown>).value);
+      assert.deepStrictEqual(modelValues, ["pair-medium-fast"]);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("rejects option combinations the account catalog does not offer", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("devin-stale-options");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-stale-opt-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const argvLogPath = NodePath.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath, {
+          T3_ACP_MODEL_IDS: FAMILY_MODEL_IDS,
+          T3_DEVIN_MODELS_JSON: FAMILY_MODELS_JSON,
+        }),
+      );
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      // `xhigh` is not offered for the Opus family in this catalog.
+      const error = yield* Effect.flip(
+        adapter.sendTurn({
+          threadId,
+          input: "use an unavailable combination",
+          attachments: [],
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("devin"),
+            model: "opus",
+            options: [{ id: "reasoningEffort", value: "xhigh" }],
+          },
+        }),
+      );
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+
+      // The rejected selection must not poison the session — the previously
+      // applied selection stays in effect and a default turn still runs.
+      yield* adapter.sendTurn({
+        threadId,
+        input: "continue with the current model",
+        attachments: [],
+      });
+      assert.equal(
+        (yield* adapter.listSessions()).find((s) => s.threadId === threadId)?.status,
+        "ready",
+      );
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("rejects model selections outside the discovered catalog", () =>
     Effect.gen(function* () {
       const adapter = yield* DevinAdapter;
@@ -1653,6 +1893,59 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
     }),
   );
 
+  it.effect(
+    "declares the attachment store as an extra workspace root on new and loaded sessions",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* DevinAdapter;
+        const settings = yield* ServerSettingsService;
+        const serverConfig = yield* Effect.service(ServerConfig);
+        const threadId = ThreadId.make("devin-attachments-workspace");
+        const tempDir = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-addldir-")),
+        );
+        const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+        const argvLogPath = NodePath.join(tempDir, "argv.txt");
+        yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+
+        const wrapperPath = yield* Effect.promise(() =>
+          makeProbeWrapper(requestLogPath, argvLogPath),
+        );
+        yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+
+        const firstSession = yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.stopSession(threadId);
+        yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          resumeCursor: firstSession.resumeCursor,
+        });
+
+        const requests = yield* waitForJsonLogMatch(
+          requestLogPath,
+          (entry) => entry.method === "session/load",
+        );
+        for (const method of ["session/new", "session/load"] as const) {
+          const params = requests.find((entry) => entry.method === method)?.params as
+            | Record<string, unknown>
+            | undefined;
+          // The attachments directory lives outside the project cwd; without
+          // declaring it, Devin modes that restrict filesystem access could
+          // not read the path line ProviderService puts in the prompt.
+          assert.include(params?.additionalDirectories, serverConfig.attachmentsDir);
+        }
+
+        yield* adapter.stopSession(threadId);
+      }),
+  );
+
   it.effect("does not offer conversation rollback Devin cannot honor", () =>
     Effect.gen(function* () {
       const adapter = yield* DevinAdapter;
@@ -1836,40 +2129,6 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
       yield* Fiber.interrupt(eventsFiber);
       assert.isFalse(events.some((event) => event.type === "session.started"));
       assert.equal(yield* adapter.hasSession(threadId), false);
-    }),
-  );
-
-  it.effect("declares the attachment store as a workspace root on session/new", () =>
-    Effect.gen(function* () {
-      const adapter = yield* DevinAdapter;
-      const settings = yield* ServerSettingsService;
-      const serverConfig = yield* ServerConfig;
-      const threadId = ThreadId.make("devin-attachments-root");
-      const tempDir = yield* Effect.promise(() =>
-        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-dirs-")),
-      );
-      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
-      const argvLogPath = NodePath.join(tempDir, "argv.txt");
-      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
-      const wrapperPath = yield* Effect.promise(() =>
-        makeProbeWrapper(requestLogPath, argvLogPath),
-      );
-      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
-      yield* adapter.startSession({
-        threadId,
-        provider: ProviderDriverKind.make("devin"),
-        cwd: process.cwd(),
-        runtimeMode: "full-access",
-      });
-      const requests = yield* waitForJsonLogMatch(
-        requestLogPath,
-        (entry) => entry.method === "session/new",
-      );
-      const params = requests.find((entry) => entry.method === "session/new")?.params as
-        | Record<string, unknown>
-        | undefined;
-      assert.deepEqual(params?.additionalDirectories, [serverConfig.attachmentsDir]);
-      yield* adapter.stopSession(threadId);
     }),
   );
 });

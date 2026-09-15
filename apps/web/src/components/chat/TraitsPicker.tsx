@@ -1,9 +1,11 @@
 import {
+  resolveProviderModelPolicy,
   type ProviderDriverKind,
   type ProviderInstanceId,
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
   type ScopedThreadRef,
+  type ServerProvider,
   type ServerProviderModel,
 } from "@t3tools/contracts";
 import {
@@ -139,6 +141,7 @@ function getSelectedTraits(
   modelOptions: ProviderOptions | null | undefined,
   allowPromptInjectedEffort: boolean,
   planModeEnabled: boolean,
+  modelPolicy: ServerProvider["modelPolicy"],
 ) {
   const caps = getProviderModelCapabilities(models, model, provider, planModeEnabled);
   const modelIsUnavailable =
@@ -153,6 +156,8 @@ function getSelectedTraits(
     : getProviderOptionDescriptors({
         caps,
         selections: modelOptions,
+        preserveUnavailableSelections:
+          resolveProviderModelPolicy({ driver: provider, modelPolicy }).optionSelection === "exact",
       });
   const selectDescriptors = descriptors.filter(
     (descriptor): descriptor is Extract<ProviderOptionDescriptor, { type: "select" }> =>
@@ -215,6 +220,7 @@ function getSelectedTraits(
 
 function getTraitsSectionVisibility(input: {
   provider: ProviderDriverKind;
+  modelPolicy?: ServerProvider["modelPolicy"];
   models: ReadonlyArray<ServerProviderModel>;
   model: string | null | undefined;
   prompt: string;
@@ -230,6 +236,7 @@ function getTraitsSectionVisibility(input: {
     input.modelOptions,
     input.allowPromptInjectedEffort ?? true,
     input.planModeEnabled,
+    input.modelPolicy,
   );
 
   const showEffort = selected.primarySelectDescriptor !== null;
@@ -257,6 +264,7 @@ function getTraitsSectionVisibility(input: {
 
 export function shouldRenderTraitsControls(input: {
   provider: ProviderDriverKind;
+  modelPolicy?: ServerProvider["modelPolicy"];
   models: ReadonlyArray<ServerProviderModel>;
   model: string | null | undefined;
   prompt: string;
@@ -269,6 +277,7 @@ export function shouldRenderTraitsControls(input: {
 
 export interface TraitsMenuContentProps {
   provider: ProviderDriverKind;
+  modelPolicy?: ServerProvider["modelPolicy"];
   instanceId?: ProviderInstanceId;
   models: ReadonlyArray<ServerProviderModel>;
   model: string | null | undefined;
@@ -284,6 +293,7 @@ export interface TraitsMenuContentProps {
 
 export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
   provider,
+  modelPolicy,
   instanceId,
   models,
   model,
@@ -324,6 +334,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
     modelIsUnavailable,
   } = getTraitsSectionVisibility({
     provider,
+    modelPolicy,
     models,
     model,
     prompt,
@@ -536,6 +547,7 @@ export function buildTraitsTriggerDisplay(input: {
 
 export const TraitsPicker = memo(function TraitsPicker({
   provider,
+  modelPolicy,
   instanceId,
   models,
   model,
@@ -560,6 +572,7 @@ export const TraitsPicker = memo(function TraitsPicker({
   const { descriptors, primarySelectDescriptor, ultrathinkPromptControlled } =
     getTraitsSectionVisibility({
       provider,
+      modelPolicy,
       models,
       model,
       prompt,
@@ -570,6 +583,7 @@ export const TraitsPicker = memo(function TraitsPicker({
   if (
     !shouldRenderTraitsControls({
       provider,
+      modelPolicy,
       models,
       model,
       prompt,
@@ -678,6 +692,7 @@ export const TraitsPicker = memo(function TraitsPicker({
       <MenuPopup align="start" {...(isComposerOwned ? composerFloatingLayerProps : {})}>
         <TraitsMenuContent
           provider={provider}
+          modelPolicy={modelPolicy}
           {...(instanceId ? { instanceId } : {})}
           models={models}
           model={model}

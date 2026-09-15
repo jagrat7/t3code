@@ -97,7 +97,9 @@ export const makeDevinTextGeneration = Effect.fn("makeDevinTextGeneration")(func
               }),
           ),
         );
-        yield* runtime.setModel(modelSelection.model).pipe(
+        // Family slugs and option selections resolve against the account's
+        // live catalog to the exact model id Devin advertises.
+        yield* runtime.applyModel(modelSelection).pipe(
           Effect.mapError(
             (cause) =>
               new TextGenerationError({

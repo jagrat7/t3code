@@ -1,3 +1,5 @@
+import { FusionModelEditor } from "./FusionModelEditor";
+import { collapseFusionOptions } from "./fusion-model-options";
 import type {
   EnvironmentId,
   ModelSelection,
@@ -305,7 +307,7 @@ type ThreadSettingsSessionValue = {
   readonly searchQuery: string;
   readonly showLegacy: boolean;
   readonly applyOptionChange: (id: string, value: string | boolean) => void;
-  readonly commitPendingModel: () => boolean;
+  readonly commitPendingModel: (model?: ModelOption) => boolean;
   readonly isApplied: (option: ModelOption) => boolean;
   readonly isDisplayed: (option: ModelOption) => boolean;
   readonly pressModel: (option: ModelOption) => void;
@@ -379,6 +381,7 @@ function ThreadSettingsSessionProvider(
           ? getProviderOptionDescriptors({
               caps: pendingModel.capabilities,
               selections: pendingModel.selection.options,
+              preserveUnavailableSelections: pendingModel.modelPolicy?.optionSelection === "exact",
             })
           : []
         : props.optionDescriptors,
@@ -389,20 +392,23 @@ function ThreadSettingsSessionProvider(
     () => props.providerGroups.some((group) => group.models.some((model) => model.isLegacy)),
     [props.providerGroups],
   );
-  const commitPendingModel = useCallback(() => {
-    if (pendingModel) {
-      if (!canCommitPendingModel(pendingModel, props.providerGroups)) {
-        Alert.alert(
-          "Model unavailable",
-          "Set up this provider on web or desktop, or select another model.",
-        );
-        return false;
+  const commitPendingModel = useCallback(
+    (model = pendingModel) => {
+      if (model) {
+        if (!canCommitPendingModel(model, props.providerGroups)) {
+          Alert.alert(
+            "Model unavailable",
+            "Set up this provider on web or desktop, or select another model.",
+          );
+          return false;
+        }
+        void Haptics.selectionAsync();
+        props.onSelectModel(model);
       }
-      void Haptics.selectionAsync();
-      props.onSelectModel(pendingModel);
-    }
-    return true;
-  }, [pendingModel, props.onSelectModel, props.providerGroups]);
+      return true;
+    },
+    [pendingModel, props.onSelectModel, props.providerGroups],
+  );
 
   const applyOptionChange = useCallback(
     (id: string, value: string | boolean) => {
@@ -551,10 +557,17 @@ function ThreadSettingsModelListRow(props: {
   readonly isLast: boolean;
 }) {
   const session = useThreadSettingsSession();
-  const onPress = useCallback(
-    () => session.pressModel(props.option),
-    [props.option, session.pressModel],
-  );
+  const navigation = useNavigation<NativeStackNavigationProp<ThreadSettingsPickerStackParams>>();
+  const onPress = useCallback(() => {
+    if (props.option.fusion && !props.option.isUnavailable) {
+      navigation.navigate("ThreadSettingsFusion", {
+        providerKey: props.option.providerKey,
+        initialKey: props.option.key,
+      });
+    } else {
+      session.pressModel(props.option);
+    }
+  }, [navigation, props.option, session]);
 
   return (
     <ModelRow
@@ -614,7 +627,7 @@ function useThreadSettingsCatalogItems(
                   session.isDisplayed(model) ||
                   session.favoriteKeys.has(model.key),
               );
-        const visibleModels = favoritesFirst(
+        const visibleModels = collapseFusionOptions(favoritesFirst(
           catalogModels.filter(
             (model) =>
               (session.providerFilter !== FAVORITES_PROVIDER_FILTER ||
@@ -626,6 +639,7 @@ function useThreadSettingsCatalogItems(
               }),
           ),
           session.favoriteKeys,
+        ), session.isDisplayed,
         );
         if (visibleModels.length === 0) {
           return [];
@@ -659,7 +673,10 @@ function useThreadSettingsCatalogItems(
           },
           ...provider.models.map((option, index) => ({
             kind: "model" as const,
-            key: `model:${option.key}`,
+            key:
+              option.fusion && !option.isUnavailable
+                ? `fusion:${option.providerKey}`
+                : `model:${option.key}`,
             option,
             isFirst: index === 0,
             isLast: index === provider.models.length - 1,
@@ -1011,6 +1028,7 @@ function ThreadSettingsChoiceContent(props: {
 
 type ThreadSettingsPickerStackParams = {
   ThreadSettingsModels: undefined;
+  ThreadSettingsFusion: { readonly providerKey: string; readonly initialKey: string };
   ThreadSettingsChoice: ThreadSettingsSubmenuPage & { readonly title: string };
 };
 
@@ -1253,6 +1271,36 @@ function ThreadSettingsModelsScreen() {
   );
 }
 
+function ThreadSettingsFusionScreen() {
+  const session = useThreadSettingsSession();
+  const presentation = useThreadSettingsPickerPresentation();
+  const navigation = useNavigation<NativeStackNavigationProp<ThreadSettingsPickerStackParams>>();
+  const route = useRoute<RouteProp<ThreadSettingsPickerStackParams, "ThreadSettingsFusion">>();
+  const models =
+    session.providerGroups.find((group) => group.providerKey === route.params.providerKey)
+      ?.models ?? [];
+  return (
+    <>
+      <NativeStackScreenOptions options={{ headerShown: Platform.OS !== "android" }} />
+      {Platform.OS === "android" ? (
+        <AndroidScreenHeader title="Fusion" onBack={() => navigation.goBack()} />
+      ) : null}
+      <FusionModelEditor
+        models={models}
+        initialKey={route.params.initialKey}
+        onSelect={(option) => {
+          const pending = session.pendingModel;
+          if (session.isApplied(option) && pending?.key !== option.key) {
+            presentation.onClose();
+          } else if (session.commitPendingModel(pending?.key === option.key ? pending : option)) {
+            presentation.onClose();
+          }
+        }}
+      />
+    </>
+  );
+}
+
 function ThreadSettingsChoiceScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<ThreadSettingsPickerStackParams>>();
   const route = useRoute<RouteProp<ThreadSettingsPickerStackParams, "ThreadSettingsChoice">>();
@@ -1317,6 +1365,11 @@ function ThreadSettingsPickerNavigator(props: ThreadSettingsPickerPresentation) 
           options={{ headerBackVisible: false, title: "Thread settings" }}
         />
         <ThreadSettingsPickerStack.Screen
+          name="ThreadSettingsFusion"
+          component={ThreadSettingsFusionScreen}
+          options={{ title: "Fusion" }}
+        />
+        <ThreadSettingsPickerStack.Screen
           name="ThreadSettingsChoice"
           component={ThreadSettingsChoiceScreen}
           options={({ route }) => ({ title: route.params.title })}
@@ -1364,10 +1417,15 @@ export function NewTaskThreadSettingsRouteScreen() {
   const optionDescriptors = useMemo(
     () =>
       resolveProviderOptionDescriptors({
+        modelPolicy: flow.selectedModelOption?.modelPolicy,
         capabilities: flow.selectedModelOption?.capabilities,
         selections: flow.selectedModel?.options,
       }),
-    [flow.selectedModel?.options, flow.selectedModelOption?.capabilities],
+    [
+      flow.selectedModel?.options,
+      flow.selectedModelOption?.capabilities,
+      flow.selectedModelOption?.modelPolicy,
+    ],
   );
 
   return (

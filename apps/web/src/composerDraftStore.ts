@@ -1,6 +1,7 @@
 import { elementContextToPreviewAnnotation } from "./lib/elementContext";
 import {
   ElementContextDetails,
+  resolveProviderModelPolicy,
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
@@ -1186,6 +1187,13 @@ export function deriveEffectiveComposerModelState(input: {
   projectModelSelection: ModelSelection | null | undefined;
   settings: UnifiedSettings;
 }): EffectiveComposerModelState {
+  const selectedSnapshot = input.providers.find(
+    (provider) => provider.instanceId === input.selectedInstanceId,
+  );
+  const isInstanceCatalog =
+    resolveProviderModelPolicy(selectedSnapshot ?? { driver: input.selectedProvider })
+      .catalogScope === "instance" ||
+    (input.selectedInstanceId != null && !selectedSnapshot);
   const baseModelCandidate =
     input.threadModelSelection?.model ?? input.projectModelSelection?.model ?? null;
   const preserveThreadModel =
@@ -1202,8 +1210,8 @@ export function deriveEffectiveComposerModelState(input: {
           { preserveUnavailableSelection: preserveThreadModel },
         )
       : null) ??
-    // Antigravity has no static model or cross-account catalog fallback.
-    (input.selectedProvider === "antigravity" && input.selectedInstanceId ? "" : null) ??
+    // Account catalogs have no static model or cross-account fallback.
+    (isInstanceCatalog && input.selectedInstanceId ? "" : null) ??
     resolveAppModelSelection(
       input.selectedProvider,
       input.settings,
@@ -1220,7 +1228,7 @@ export function deriveEffectiveComposerModelState(input: {
     ? input.draft?.modelSelectionByProvider?.[input.selectedInstanceId]
     : undefined;
   const legacySelection =
-    input.selectedProvider === "antigravity" &&
+    isInstanceCatalog &&
     input.selectedInstanceId &&
     input.selectedInstanceId !== defaultInstanceIdForDriver(input.selectedProvider)
       ? undefined
@@ -1237,7 +1245,7 @@ export function deriveEffectiveComposerModelState(input: {
         activeSelection.model,
         { preserveUnavailableSelection: true },
       ) ??
-      (input.selectedProvider === "antigravity" ? "" : null) ??
+      (isInstanceCatalog ? "" : null) ??
       resolveAppModelSelection(
         input.selectedProvider,
         input.settings,

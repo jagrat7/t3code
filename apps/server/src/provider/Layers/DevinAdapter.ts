@@ -16,6 +16,7 @@ import {
   ApprovalRequestId,
   type DevinSettings,
   EventId,
+  type ModelSelection,
   type ProviderApprovalDecision,
   type ProviderInteractionMode,
   type ProviderRuntimeEvent,
@@ -58,7 +59,6 @@ import {
   ProviderAdapterValidationError,
 } from "../Errors.ts";
 import { acpPermissionOutcome, mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
-import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import {
   makeAcpAssistantItemEvent,
   makeAcpContentDeltaEvent,
@@ -73,7 +73,7 @@ import {
   parsePermissionRequest,
 } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
-import { makeDevinAcpRuntime } from "../acp/DevinAcpSupport.ts";
+import { type DevinAcpRuntime, makeDevinAcpRuntime } from "../acp/DevinAcpSupport.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import type { ProviderAdapterError } from "../Errors.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -127,7 +127,7 @@ interface DevinSessionContext {
   readonly threadId: ThreadId;
   session: ProviderSession;
   readonly scope: Scope.Closeable;
-  readonly acp: AcpSessionRuntime.AcpSessionRuntime["Service"];
+  readonly acp: DevinAcpRuntime;
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
@@ -139,6 +139,9 @@ interface DevinSessionContext {
    * continues it, and only the last remaining prompt settles the turn. */
   promptsInFlight: number;
   readonly supportsImages: boolean;
+  /** Last model selection bound to this session; re-applied each turn so a
+   * family slug keeps resolving against the live catalog. */
+  modelSelection: ModelSelection | undefined;
   /** Set when the ACP transport dies on its own; the stop settles the
    * session as an error exit rather than a graceful one. */
   disconnectReason: string | undefined;
@@ -268,27 +271,28 @@ function resolveRequestedModeId(input: {
 }
 
 function applyRequestedSessionConfiguration<E>(input: {
-  readonly runtime: AcpSessionRuntime.AcpSessionRuntime["Service"];
+  readonly runtime: DevinAcpRuntime;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode | undefined;
-  readonly model: string | undefined;
+  readonly modelSelection: ModelSelection | undefined;
   readonly mapError: (context: {
     readonly cause: import("effect-acp/errors").AcpError;
     readonly method: "session/set_config_option" | "session/set_mode";
   }) => E;
   readonly missingModeError: (runtimeMode: RuntimeMode) => E;
-}): Effect.Effect<void, E> {
+}): Effect.Effect<string | undefined, E> {
   return Effect.gen(function* () {
-    if (input.model !== undefined) {
-      yield* input.runtime.setModel(input.model).pipe(
-        Effect.mapError((cause) =>
-          input.mapError({
-            cause,
-            method: "session/set_config_option",
-          }),
-        ),
-      );
-    }
+    const appliedModel =
+      input.modelSelection !== undefined
+        ? yield* input.runtime.applyModel(input.modelSelection).pipe(
+            Effect.mapError((cause) =>
+              input.mapError({
+                cause,
+                method: "session/set_config_option",
+              }),
+            ),
+          )
+        : undefined;
 
     const requestedModeId = resolveRequestedModeId({
       interactionMode: input.interactionMode,
@@ -299,7 +303,7 @@ function applyRequestedSessionConfiguration<E>(input: {
       if (input.interactionMode !== "plan" && input.runtimeMode === "approval-required") {
         return yield* Effect.fail(input.missingModeError(input.runtimeMode));
       }
-      return;
+      return appliedModel;
     }
 
     yield* input.runtime.setMode(requestedModeId).pipe(
@@ -310,6 +314,7 @@ function applyRequestedSessionConfiguration<E>(input: {
         }),
       ),
     );
+    return appliedModel;
   });
 }
 
@@ -706,11 +711,11 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
           const devinModelSelection =
             input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
 
-          yield* applyRequestedSessionConfiguration({
+          const appliedModel = yield* applyRequestedSessionConfiguration({
             runtime: acp,
             runtimeMode: input.runtimeMode,
             interactionMode: undefined,
-            model: devinModelSelection?.model,
+            modelSelection: devinModelSelection,
             mapError: ({ cause, method }) =>
               mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
             missingModeError: (runtimeMode) =>
@@ -728,7 +733,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             status: "ready",
             runtimeMode: input.runtimeMode,
             cwd,
-            ...(devinModelSelection ? { model: devinModelSelection.model } : {}),
+            ...(appliedModel !== undefined ? { model: appliedModel } : {}),
             threadId: input.threadId,
             resumeCursor: {
               schemaVersion: DEVIN_RESUME_VERSION,
@@ -752,6 +757,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             promptsInFlight: 0,
             supportsImages:
               started.initializeResult.agentCapabilities?.promptCapabilities?.image === true,
+            modelSelection: devinModelSelection,
             disconnectReason: undefined,
             stopped: false,
           };
@@ -943,13 +949,12 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
         return yield* Effect.gen(function* () {
           const turnModelSelection =
             input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
-          const model = turnModelSelection?.model ?? ctx.session.model;
-
-          yield* applyRequestedSessionConfiguration({
+          const modelSelection = turnModelSelection ?? ctx.modelSelection;
+          const appliedModel = yield* applyRequestedSessionConfiguration({
             runtime: ctx.acp,
             runtimeMode: ctx.session.runtimeMode,
             interactionMode: input.interactionMode,
-            model,
+            modelSelection,
             mapError: ({ cause, method }) =>
               mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
             missingModeError: (runtimeMode) =>
@@ -974,19 +979,24 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
               }
               ctx.activeTurnId = turnId;
               ctx.lastPlanFingerprint = undefined;
+              // `applyModel` resolved the selection to the exact catalog id —
+              // that is the model the session is actually running.
               ctx.session = {
                 ...ctx.session,
-                ...(model !== undefined ? { model } : {}),
+                ...(appliedModel !== undefined ? { model: appliedModel } : {}),
                 activeTurnId: turnId,
                 updatedAt: yield* nowIso,
               };
+              if (turnModelSelection) {
+                ctx.modelSelection = turnModelSelection;
+              }
               yield* offerRuntimeEvent({
                 type: "turn.started",
                 ...(yield* makeEventStamp()),
                 provider: PROVIDER,
                 threadId: input.threadId,
                 turnId,
-                payload: model !== undefined ? { model } : {},
+                payload: appliedModel !== undefined ? { model: appliedModel } : {},
               });
               turnStarted = true;
             }),
