@@ -86,7 +86,10 @@ export function FusionModelEditor(props: {
                         role === "lead"
                           ? fusionLeadPairing(available, selected, model.fusion?.lead.id ?? "")
                           : model;
-                      if (next) setSelectedKey(next.key);
+                      if (next) {
+                        setSelectedKey(next.key);
+                        props.onSelect(fusionOptionWithSelections(next, props.initialOptions));
+                      }
                       setEditing(null);
                     }}
                     className="min-h-12 flex-row items-center gap-3 px-4 py-3 active:bg-subtle"
@@ -104,13 +107,6 @@ export function FusionModelEditor(props: {
           </View>
         ))}
       </View>
-      <Pressable
-        accessibilityRole="button"
-        onPress={() => props.onSelect(selected)}
-        className="min-h-12 items-center justify-center rounded-2xl bg-primary px-4 py-3 active:opacity-70"
-      >
-        <Text className="text-base font-t3-medium text-primary-foreground">Use Fusion</Text>
-      </Pressable>
     </ScrollView>
   );
 }

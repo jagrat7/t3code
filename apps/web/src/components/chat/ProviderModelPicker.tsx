@@ -172,7 +172,6 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   ) => {
     if (props.disabled) return;
     props.onInstanceModelChange(instanceId, model, options);
-    setIsMenuOpen(false);
   };
 
   const shortcutLabel = props.keybindings

@@ -14,7 +14,7 @@ import { memo, useMemo, useState, useCallback, useEffect, useLayoutEffect, useRe
 import { ChevronRightIcon, SearchIcon, StarIcon } from "lucide-react";
 import { DevinIcon } from "../Icons";
 import { FusionModelPicker } from "./FusionModelPicker";
-import { collapseFusionModels } from "./fusionModelPicker";
+import { collapseFusionModels, fusionOptionsForModel } from "./fusionModelPicker";
 import { ModelListRow } from "./ModelListRow";
 import { ModelPickerSidebar } from "./ModelPickerSidebar";
 import { getProviderStatusMessage, hasProviderSetup } from "./ProviderStatusBanner";
@@ -635,6 +635,16 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         (selectedInstanceId !== "favorites" || isSearching)
       ) {
         setFusionSelection({ instanceId, model: modelSlug });
+        if (!getModelDisabledReason?.(instanceId, modelSlug)) {
+          onInstanceModelChange(
+            instanceId,
+            modelSlug,
+            fusionOptionsForModel(
+              option,
+              instanceId === props.activeInstanceId ? props.activeModelOptions : undefined,
+            ),
+          );
+        }
         return;
       }
       if (getModelDisabledReason?.(instanceId, modelSlug)) {
@@ -657,6 +667,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           onToggleModel(instanceId, resolvedModel);
         } else {
           onInstanceModelChange(instanceId, resolvedModel);
+          props.onRequestClose?.();
         }
       }
     },
@@ -666,6 +677,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       modelOptionsByInstance,
       onInstanceModelChange,
       onToggleModel,
+      props,
       selectedInstanceId,
       isSearching,
       setFusionSelection,
