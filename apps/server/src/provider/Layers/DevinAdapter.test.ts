@@ -224,6 +224,43 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
     }),
   );
 
+  it.effect("never sends authenticate to a CLI-authenticated Devin agent", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("devin-no-auth-thread");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-auth-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const argvLogPath = NodePath.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath),
+      );
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      // session/new follows authenticate in start order, so once it is
+      // logged an authenticate request would already be on the wire.
+      const requests = yield* waitForJsonLogMatch(
+        requestLogPath,
+        (entry) => entry.method === "session/new",
+      );
+      assert.isTrue(requests.some((entry) => entry.method === "initialize"));
+      assert.isFalse(requests.some((entry) => entry.method === "authenticate"));
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("resumes a persisted Devin session through session/load", () =>
     Effect.gen(function* () {
       const adapter = yield* DevinAdapter;
