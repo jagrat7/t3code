@@ -71,32 +71,54 @@ describe("parseDevinAuthStatusOutput", () => {
 });
 
 describe("parseDevinModelsJsonOutput", () => {
-  it("flattens family variants into discovered models and marks adaptive default", () => {
+  it("collapses related variants into one family model and marks adaptive default", () => {
     const models = parseDevinModelsJsonOutput(MODELS_JSON_OUTPUT);
     expect(models.map((model) => [model.slug, model.name, model.isDefault ?? false])).toEqual([
-      ["swe-2-high", "SWE-2 High", false],
-      ["swe-2-medium", "SWE-2 Medium", false],
-      ["adaptive", "Adaptive", true],
+      ["swe-2", "SWE-2", false],
+      ["Adaptive", "Adaptive", true],
     ]);
     expect(models.every((model) => !model.isCustom)).toBe(true);
+    // "SWE-2 High"/"SWE-2 Medium" become thinking-level choices, not
+    // separate models; the exact model_uid is resolved at dispatch.
+    expect(models[0]?.capabilities?.optionDescriptors?.[0]).toMatchObject({
+      id: "reasoningEffort",
+      type: "select",
+      options: [
+        { id: "medium", label: "Medium" },
+        { id: "high", label: "High" },
+      ],
+    });
   });
 
-  it("dedupes repeated model ids and falls back to the slug for a missing label", () => {
+  it("keeps unfamiliar catalog entries as selectable exact models", () => {
     const models = parseDevinModelsJsonOutput(
       JSON.stringify({
         families: [
-          { family_uid: "a", variants: [{ model_uid: "m-1" }] },
-          { family_uid: "b", variants: [{ model_uid: "m-1" }, { model_uid: "m-2" }] },
+          {
+            slug: "future",
+            family_label: "Future",
+            variants: [
+              { model_uid: "m-1", label: "Future Special" },
+              { model_uid: "m-2", label: "Future Experimental" },
+            ],
+          },
         ],
       }),
     );
-    expect(models.map((model) => model.slug)).toEqual(["m-1", "m-2"]);
-    expect(models[0]?.name).toBe("m-1");
+    expect(models.map((model) => [model.slug, model.name])).toEqual([
+      ["m-1", "Future Special"],
+      ["m-2", "Future Experimental"],
+    ]);
   });
 
-  it("returns an empty catalog for invalid JSON or a missing families key", () => {
+  it("returns an empty catalog for invalid JSON or a structurally unrecognized payload", () => {
     expect(parseDevinModelsJsonOutput("not json")).toEqual([]);
     expect(parseDevinModelsJsonOutput("{}")).toEqual([]);
+    expect(
+      parseDevinModelsJsonOutput(
+        JSON.stringify({ families: [{ family_uid: "a", variants: [{ model_uid: "m-1" }] }] }),
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -272,13 +294,14 @@ it.layer(NodeServices.layer)("checkDevinProviderStatus", (it) => {
         type: "cached_token",
         label: "Devin account",
       });
-      expect(snapshot.models.map((model) => model.slug)).toEqual([
-        "swe-2-high",
-        "swe-2-medium",
-        "adaptive",
-      ]);
+      expect(snapshot.models.map((model) => model.slug)).toEqual(["swe-2", "Adaptive"]);
       expect(snapshot.slashCommands.map((command) => command.name)).toEqual(["compact"]);
       expect(snapshot.supportsConversationRollback).toBe(false);
+      expect(snapshot.modelPolicy).toEqual({
+        catalogScope: "instance",
+        preserveUnavailableModels: true,
+        optionSelection: "exact",
+      });
     }),
   );
 

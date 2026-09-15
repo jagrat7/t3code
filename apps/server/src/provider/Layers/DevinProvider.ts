@@ -1,6 +1,5 @@
 import {
   type DevinSettings,
-  type ModelCapabilities,
   type ServerProvider,
   type ServerProviderAuth,
   type ServerProviderModel,
@@ -15,7 +14,6 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
-import { createModelCapabilities } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 
 import {
@@ -32,6 +30,7 @@ import {
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
 import { makeDevinAcpRuntime } from "../acp/DevinAcpSupport.ts";
+import { DevinModelCatalog, devinModels } from "../acp/DevinModels.ts";
 
 export const DEVIN_PRESENTATION = {
   displayName: "Devin",
@@ -40,21 +39,25 @@ export const DEVIN_PRESENTATION = {
   // existing ACP session-mode path once sessions exist.
   showInteractionModeToggle: false,
 } as const;
-const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
-  optionDescriptors: [],
-});
-
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
 // `initialize` is a single local round trip, so this is generous even on slow machines.
 const DEVIN_ACP_INITIALIZE_TIMEOUT_MS = 8_000;
 
 // Devin cannot rewind a native session, so no draft may advertise
-// conversation rollback regardless of probe outcome.
+// conversation rollback regardless of probe outcome. Its catalog is scoped
+// to the signed-in account: saved selections stay visible when the live
+// catalog drops them, and option choices resolve to exact advertised ids
+// rather than being coerced to the nearest current variant.
 const buildDevinProviderDraft = (
   input: Parameters<typeof buildServerProvider>[0],
 ): ServerProviderDraft => ({
   ...buildServerProvider(input),
   supportsConversationRollback: false,
+  modelPolicy: {
+    catalogScope: "instance",
+    preserveUnavailableModels: true,
+    optionSelection: "exact",
+  },
 });
 
 export function buildInitialDevinProviderSnapshot(
@@ -95,58 +98,21 @@ export function buildInitialDevinProviderSnapshot(
   });
 }
 
-const DevinModelsListOutput = Schema.Struct({
-  families: Schema.optionalKey(
-    Schema.Array(
-      Schema.Struct({
-        family_label: Schema.optionalKey(Schema.String),
-        family_uid: Schema.optionalKey(Schema.String),
-        slug: Schema.optionalKey(Schema.String),
-        variants: Schema.optionalKey(
-          Schema.Array(
-            Schema.Struct({
-              model_uid: Schema.optionalKey(Schema.String),
-              label: Schema.optionalKey(Schema.String),
-            }),
-          ),
-        ),
-      }),
-    ),
-  ),
-});
-const decodeDevinModelsListOutput = Schema.decodeUnknownOption(
-  Schema.fromJsonString(DevinModelsListOutput),
-);
+const decodeDevinModelsListOutput = Schema.decodeUnknownOption(DevinModelCatalog);
 
 /**
- * `devin models list --format json` groups selectable models into families;
- * every variant's `model_uid` is an id `devin acp` accepts. `adaptive` is
- * Devin's own default selection, so it carries the default marker.
+ * `devin models list --format json` groups selectable models into families.
+ * Families whose variant labels form a complete capability matrix collapse
+ * into one model with option descriptors; unfamiliar entries stay selectable
+ * as their exact `model_uid`. `adaptive` is Devin's own default selection,
+ * so it carries the default marker.
  */
 export function parseDevinModelsJsonOutput(output: string): ReadonlyArray<ServerProviderModel> {
   const decoded = decodeDevinModelsListOutput(output);
   if (Option.isNone(decoded)) {
     return [];
   }
-  const seen = new Set<string>();
-  const models: ServerProviderModel[] = [];
-  for (const family of decoded.value.families ?? []) {
-    for (const variant of family.variants ?? []) {
-      const slug = variant.model_uid?.trim();
-      if (!slug || seen.has(slug)) {
-        continue;
-      }
-      seen.add(slug);
-      models.push({
-        slug,
-        name: variant.label?.trim() || slug,
-        isCustom: false,
-        ...(slug === "adaptive" ? { isDefault: true } : {}),
-        capabilities: EMPTY_CAPABILITIES,
-      });
-    }
-  }
-  return models;
+  return devinModels(decoded.value);
 }
 
 /**

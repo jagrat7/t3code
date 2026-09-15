@@ -31,10 +31,29 @@ function makeAcpDevinWrapper(dir: string, env: Record<string, string>): string {
     directory: NodePath.join(dir, "bin"),
     name: "devin",
     env,
-    source: execScriptSource({
-      scriptPath: mockAgentPath,
-      expectedArgs: ["acp"],
-    }),
+    source: [
+      // `applyModel` resolves selections against `devin models list` before
+      // the ACP session is asked to switch. The fake CLI answers from
+      // `T3_DEVIN_MODELS_JSON` or one family per `T3_ACP_MODEL_IDS` entry.
+      'if (process.argv[2] === "models") {',
+      "  const catalog = process.env.T3_DEVIN_MODELS_JSON ?? JSON.stringify({",
+      '    families: (process.env.T3_ACP_MODEL_IDS ?? "adaptive")',
+      '      .split(",")',
+      "      .filter(Boolean)",
+      "      .map((id) => ({",
+      "        slug: id,",
+      "        family_label: id,",
+      "        variants: [{ model_uid: id, label: id }],",
+      "      })),",
+      "  });",
+      '  process.stdout.write(catalog + "\\n");',
+      "  process.exit(0);",
+      "}",
+      execScriptSource({
+        scriptPath: mockAgentPath,
+        expectedArgs: ["acp"],
+      }),
+    ].join("\n"),
   });
 }
 
@@ -202,6 +221,8 @@ it.layer(DevinTextGenerationTestLayer)("DevinTextGeneration", (it) => {
   it.effect("surfaces an unadvertised model selection as a text generation error", () =>
     withFakeAcpDevin(
       {
+        // Agent-side validation: the account only advertises `adaptive`.
+        T3_ACP_MODEL_IDS: "adaptive",
         T3_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify({ branch: "unreachable" }),
       },
       (textGeneration) =>

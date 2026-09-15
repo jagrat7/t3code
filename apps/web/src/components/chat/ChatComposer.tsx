@@ -1958,6 +1958,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () =>
       getComposerProviderState({
         provider: selectedProvider,
+        modelPolicy: selectedProviderStatus?.modelPolicy,
         model: selectedModel,
         models: selectedProviderModels,
         promptInjectionState: composerPromptInjectionState,
@@ -1971,6 +1972,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       selectedModel,
       selectedProvider,
       selectedProviderModels,
+      selectedProviderStatus?.modelPolicy,
       settings.planModeEnabled,
     ],
   );
@@ -2563,6 +2565,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const providerTraitsMenuContent = renderProviderTraitsMenuContent({
     provider: selectedProvider,
+    modelPolicy: selectedProviderStatus?.modelPolicy,
     instanceId: selectedInstanceId,
     ...(routeKind === "server" ? { threadRef: routeThreadRef } : {}),
     ...(routeKind === "draft" && draftId ? { draftId } : {}),
@@ -2575,6 +2578,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   });
   const providerTraitsPickerInput = {
     provider: selectedProvider,
+    modelPolicy: selectedProviderStatus?.modelPolicy,
     instanceId: selectedInstanceId,
     ...(routeKind === "server" ? { threadRef: routeThreadRef } : {}),
     ...(routeKind === "draft" && draftId ? { draftId } : {}),

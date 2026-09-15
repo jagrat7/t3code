@@ -1,3 +1,4 @@
+import { resolveProviderModelPolicy } from "@t3tools/contracts";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
   type ProviderInstanceId,
@@ -78,14 +79,16 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       model: props.model,
       options: selectedInstanceOptions,
     }) ??
-    (activeEntry?.driverKind === "opencode" || activeEntry?.driverKind === "antigravity"
+    (resolveProviderModelPolicy(activeEntry?.snapshot).preserveUnavailableModels
       ? undefined
       : selectedInstanceOptions[0]);
-  const triggerTitle = selectedModel
-    ? getTriggerDisplayModelName(selectedModel)
-    : props.model === ANTIGRAVITY_DEFAULT_MODEL
-      ? "Choose model"
-      : props.model || "Choose model";
+  const triggerTitle = selectedModel?.fusion
+    ? "Fusion"
+    : selectedModel
+      ? getTriggerDisplayModelName(selectedModel)
+      : props.model === ANTIGRAVITY_DEFAULT_MODEL
+        ? "Choose model"
+        : props.model || "Choose model";
   const triggerLabel = selectedModel
     ? `${getTriggerDisplayModelLabel(selectedModel)}${selectedModel.isUnavailable ? " (Unavailable)" : ""}`
     : triggerTitle;
@@ -224,8 +227,9 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       <PopoverPopup
         {...(props.isComposerOwned ? composerFloatingLayerProps : {})}
         align="start"
-        className="before:hidden [--viewport-inline-padding:0]"
-        viewportClassName="overflow-hidden! rounded-[calc(var(--radius-lg)-1px)] p-0 [clip-path:inset(0_round_calc(var(--radius-lg)-1px))]"
+        className="h-auto w-max before:hidden [--viewport-inline-padding:0]"
+        // Measure each view's intrinsic width instead of constraining it to the previous popup size.
+        viewportClassName="h-auto w-max overflow-hidden! rounded-[calc(var(--radius-lg)-1px)] p-0 [clip-path:inset(0_round_calc(var(--radius-lg)-1px))] **:data-current:w-max **:data-previous:w-max"
       >
         <ModelPickerContent
           activeInstanceId={activeInstanceId}

@@ -1,4 +1,5 @@
 import {
+  resolveProviderModelPolicy,
   ANTIGRAVITY_DEFAULT_MODEL,
   type ProviderInstanceId,
   type ProviderDriverKind,
@@ -8,7 +9,10 @@ import { resolveSelectableModel } from "@t3tools/shared/model";
 import { useAtomValue } from "@effect/atom-react";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { memo, useMemo, useState, useCallback, useEffect, useLayoutEffect, useRef } from "react";
-import { ChevronRightIcon, SearchIcon } from "lucide-react";
+import { ChevronRightIcon, SearchIcon, StarIcon } from "lucide-react";
+import { DevinIcon } from "../Icons";
+import { FusionModelPicker } from "./FusionModelPicker";
+import { collapseFusionModels } from "./fusionModelPicker";
 import { ModelListRow } from "./ModelListRow";
 import { ModelPickerSidebar } from "./ModelPickerSidebar";
 import { getProviderStatusMessage, hasProviderSetup } from "./ProviderStatusBanner";
@@ -38,7 +42,7 @@ import {
 import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
 import { getVirtualizedScrollFadeClassName } from "../ui/scroll-area";
-import { TooltipProvider } from "../ui/tooltip";
+import { Tooltip, TooltipPopup, TooltipTrigger, TooltipProvider } from "../ui/tooltip";
 import { Button } from "../ui/button";
 import {
   isProviderInstancePickerReady,
@@ -48,6 +52,8 @@ import {
 import { providerModelKey, sortProviderModelItems } from "../../modelOrdering";
 
 type ModelPickerItem = {
+  isFusionGroup?: boolean;
+  fusion?: ModelEsque["fusion"];
   slug: string;
   name: string;
   shortName?: string;
@@ -91,7 +97,7 @@ export function shouldIncludeModelPickerOption(input: {
   if (isProviderInstancePickerReady(input.entry)) return true;
   return (
     input.entry.enabled &&
-    (input.entry.driverKind === "opencode" || input.entry.driverKind === "antigravity") &&
+    resolveProviderModelPolicy(input.entry.snapshot).preserveUnavailableModels === true &&
     input.entry.instanceId === input.activeInstanceId &&
     input.option.slug === input.activeModel &&
     input.option.isUnavailable === true
@@ -207,6 +213,12 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const activeModelKey = activeModelSlug
     ? modelPickerModelKey(props.activeInstanceId, activeModelSlug)
     : null;
+  const [fusionSelection, setFusionSelection] = useState<{
+    instanceId: ProviderInstanceId;
+    model: string;
+  } | null>(() =>
+    activeModel?.fusion ? { instanceId: props.activeInstanceId, model: activeModel.slug } : null,
+  );
   const activeInstanceHasSelectableUnavailableModel =
     activeEntry !== undefined &&
     (modelOptionsByInstance.get(props.activeInstanceId) ?? []).some((option) =>
@@ -358,6 +370,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         out.push({
           slug: model.slug,
           name: model.name,
+          fusion: model.fusion,
           ...(model.shortName ? { shortName: model.shortName } : {}),
           ...(model.subProvider ? { subProvider: model.subProvider } : {}),
           ...(model.badge ? { badge: model.badge } : {}),
@@ -413,7 +426,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   );
 
   // Filter models based on search query and selected instance
-  const filteredModels = useMemo(() => {
+  const matchingModels = useMemo(() => {
     let result = flatModels;
 
     // Apply tokenized fuzzy search across the combined provider/model search fields.
@@ -518,6 +531,17 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     selectedInstanceId,
   ]);
 
+  // Favorites rows keep their exact pairing so each saved lead+sidekick
+  // stays directly selectable; everywhere else pairings collapse to one
+  // Fusion entry per account that opens the pairing editor.
+  const filteredModels = useMemo(
+    () =>
+      selectedInstanceId === "favorites" && !isSearching
+        ? matchingModels
+        : collapseFusionModels(matchingModels, props.activeInstanceId, activeModelSlug),
+    [matchingModels, props.activeInstanceId, activeModelSlug, selectedInstanceId, isSearching],
+  );
+
   const legacySection = useMemo(() => {
     if (isSearching || selectedInstanceId === "favorites") {
       return null;
@@ -576,6 +600,17 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
 
   const handleModelSelect = useCallback(
     (modelSlug: string, instanceId: ProviderInstanceId) => {
+      const option = modelOptionsByInstance
+        .get(instanceId)
+        ?.find((model) => model.slug === modelSlug);
+      if (
+        option?.fusion &&
+        !option.isUnavailable &&
+        (selectedInstanceId !== "favorites" || isSearching)
+      ) {
+        setFusionSelection({ instanceId, model: modelSlug });
+        return;
+      }
       if (getModelDisabledReason?.(instanceId, modelSlug)) {
         return;
       }
@@ -595,7 +630,15 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         onInstanceModelChange(instanceId, resolvedModel);
       }
     },
-    [entryByInstanceId, getModelDisabledReason, modelOptionsByInstance, onInstanceModelChange],
+    [
+      entryByInstanceId,
+      getModelDisabledReason,
+      modelOptionsByInstance,
+      onInstanceModelChange,
+      selectedInstanceId,
+      isSearching,
+      setFusionSelection,
+    ],
   );
 
   const toggleFavorite = useCallback(
@@ -707,7 +750,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
 
   useEffect(() => {
     const onWindowKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.defaultPrevented || event.repeat || isCommandPaletteOpen()) {
+      if (fusionSelection || event.defaultPrevented || event.repeat || isCommandPaletteOpen()) {
         return;
       }
 
@@ -762,6 +805,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     selectableUnavailableInstanceIds,
     selectedInstanceId,
     sidebarInstanceEntries,
+    fusionSelection,
   ]);
 
   useLayoutEffect(() => {
@@ -778,10 +822,37 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     };
   }, [filteredItemKeys, updateModelListScrollFades]);
 
+  if (fusionSelection) {
+    const instanceId = fusionSelection.instanceId;
+    const models = flatModels.filter(
+      (model) =>
+        model.instanceId === instanceId &&
+        model.fusion &&
+        !model.isUnavailable &&
+        matchesLockedProvider(model) &&
+        !getModelDisabledReason?.(instanceId, model.slug),
+    );
+    return (
+      <FusionModelPicker
+        models={models}
+        model={fusionSelection.model}
+        providerName={entryByInstanceId.get(instanceId)?.displayName ?? "Devin"}
+        onBack={() => {
+          setFusionSelection(null);
+          window.requestAnimationFrame(focusSearchInput);
+        }}
+        onSelect={(model) => onInstanceModelChange(instanceId, model)}
+      />
+    );
+  }
+
   return (
     <TooltipProvider delay={0}>
       <div
-        className="relative flex h-screen max-h-86.5 w-screen max-w-90 flex-row overflow-hidden"
+        className={cn(
+          "relative flex h-screen max-h-86.5 w-screen max-w-90 flex-row overflow-hidden",
+          filteredItemKeys.length === 1 && visibleModels[0]?.fusion && "h-30",
+        )}
         data-model-picker-content="true"
       >
         {/* Sidebar */}
@@ -952,6 +1023,59 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                     const model = filteredModelByKey.get(modelKey);
                     if (!model) {
                       return null;
+                    }
+                    if (model.fusion && model.isFusionGroup) {
+                      const isFavorite = favoritesSet.has(
+                        providerModelKey(model.instanceId, model.slug),
+                      );
+                      return (
+                        <ComboboxItem
+                          hideIndicator
+                          index={index}
+                          value={modelKey}
+                          className="w-full min-w-0 cursor-pointer rounded-md px-2 py-2"
+                          contentClassName="flex w-full min-w-0 items-center gap-3"
+                        >
+                          <div className="min-w-0 flex-1 text-left">
+                            <div className="text-xs font-medium leading-snug">Fusion</div>
+                            <div className="mt-1 flex items-center gap-1.5">
+                              <DevinIcon className="size-3 shrink-0" />
+                              <Tooltip>
+                                <TooltipTrigger
+                                  render={
+                                    <span className="truncate text-xs font-normal leading-snug text-muted-foreground/70" />
+                                  }
+                                >
+                                  {model.fusion.lead.name} + {model.fusion.sidekick.name}
+                                </TooltipTrigger>
+                                <TooltipPopup>
+                                  {model.instanceDisplayName} · {model.fusion.lead.name} +{" "}
+                                  {model.fusion.sidekick.name}
+                                </TooltipPopup>
+                              </Tooltip>
+                            </div>
+                          </div>
+                          <Button
+                            size="icon-xs"
+                            variant="ghost"
+                            className="shrink-0 text-muted-foreground/70 hover:text-foreground"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              toggleFavorite(model.instanceId, model.slug);
+                            }}
+                            onKeyDown={(event) => event.stopPropagation()}
+                            aria-label={isFavorite ? "Remove from favorites" : "Add to favorites"}
+                          >
+                            <StarIcon
+                              className={cn(
+                                "size-3.5 sm:size-3",
+                                isFavorite && "fill-current text-yellow-500",
+                              )}
+                            />
+                          </Button>
+                          <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                        </ComboboxItem>
+                      );
                     }
                     const disabledReason =
                       getModelDisabledReason?.(model.instanceId, model.slug) ?? null;

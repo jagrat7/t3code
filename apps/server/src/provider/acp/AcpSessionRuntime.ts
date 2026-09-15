@@ -87,6 +87,8 @@ export interface AcpSessionRuntimeOptions {
   /** Native cancellation waits for the prompt response and the getEvents consumer to drain. */
   readonly cancelBehavior?: "interrupt" | "wait-for-prompt";
   readonly cancelTimeout?: Duration.Input;
+  /** Let providers with incomplete cached model lists validate selections themselves. */
+  readonly modelValidation?: "client" | "agent";
   readonly clientCapabilities?: EffectAcpSchema.InitializeRequest["clientCapabilities"];
   readonly clientInfo: {
     readonly name: string;
@@ -655,8 +657,9 @@ export const make = (
     const setConfigOption = (
       configId: string,
       value: string | boolean,
+      validate = true,
     ): Effect.Effect<EffectAcpSchema.SetSessionConfigOptionResponse, EffectAcpErrors.AcpError> =>
-      validateConfigOptionValue(configId, value).pipe(
+      (validate ? validateConfigOptionValue(configId, value) : Effect.void).pipe(
         Effect.flatMap(() => getStartedState),
         Effect.flatMap((started) =>
           Ref.get(configOptionsRef).pipe(
@@ -1065,7 +1068,13 @@ export const make = (
       setConfigOption,
       setModel: (model) =>
         getStartedState.pipe(
-          Effect.flatMap((started) => setConfigOption(started.modelConfigId ?? "model", model)),
+          Effect.flatMap((started) =>
+            setConfigOption(
+              started.modelConfigId ?? "model",
+              model,
+              options.modelValidation !== "agent",
+            ),
+          ),
           Effect.asVoid,
         ),
       setSessionModel: (modelId, meta) =>

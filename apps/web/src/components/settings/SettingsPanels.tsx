@@ -3010,6 +3010,7 @@ export function GeneralSettingsPanel() {
                 {textGenInstanceEntry ? (
                   <TraitsPicker
                     provider={textGenProvider}
+                    modelPolicy={textGenInstanceEntry?.snapshot?.modelPolicy}
                     models={
                       // Use the exact instance's models (rather than the
                       // first-kind-match) so a custom text-gen instance like
