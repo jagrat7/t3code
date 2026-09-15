@@ -10,8 +10,8 @@ import { ComposerBanner } from "./ComposerBanner";
 
 /**
  * Zed-style message queue, docked to the composer as a banner attachment.
- * Rows mirror Zed's queue: a status dot, the message, then discard / edit /
- * Send now actions. Editing moves the message back into the composer.
+ * Each row shows the message and discard / edit / Send now actions.
+ * Editing moves the message back into the composer.
  */
 export const QueuedMessagesPanel = memo(function QueuedMessagesPanel({
   messages,
@@ -43,7 +43,7 @@ export const QueuedMessagesPanel = memo(function QueuedMessagesPanel({
       <ComposerBanner.Root>
         <div
           className={cn(
-            "flex items-center justify-between gap-1",
+            "flex items-center justify-between gap-2 px-2 py-1",
             expanded && "border-b border-(--chat-composer-attached-outline)",
           )}
         >
@@ -61,12 +61,16 @@ export const QueuedMessagesPanel = memo(function QueuedMessagesPanel({
                 !expanded && "-rotate-90",
               )}
             />
-            <span className="truncate">
-              {messages.length} Queued {messages.length === 1 ? "Message" : "Messages"}
-            </span>
+            <span className="truncate">{messages.length} queued</span>
           </button>
-          <Button size="micro" variant="ghost-muted" onClick={onClearAll}>
-            Clear All
+          <Button
+            size="micro"
+            variant="ghost-muted"
+            className="shrink-0"
+            onPointerDown={(event) => event.preventDefault()}
+            onClick={onClearAll}
+          >
+            Clear all
           </Button>
         </div>
         {expanded ? (
@@ -110,39 +114,17 @@ function QueuedMessageRow({
     message.previewAnnotations.length +
     message.reviewComments.length;
   const text = message.prompt.trim();
-  const positionLabel = isNext
-    ? message.holdUntilUserAction
-      ? "Waiting for Send now"
-      : "Next in queue"
-    : "In queue";
   return (
     <div
-      className="group/queue-entry flex items-center gap-1 px-1 py-1.5 not-last:border-b not-last:border-(--chat-composer-attached-outline)"
+      className="group/queue-entry flex items-center gap-1 px-2 py-1.5 not-last:border-b not-last:border-(--chat-composer-attached-outline)"
       data-queued-message-id={message.id}
     >
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <span
-              role="img"
-              aria-label={positionLabel}
-              className="flex size-5 flex-none items-center justify-center"
-            />
-          }
-        >
-          <span
-            aria-hidden
-            className={cn(
-              "size-1.5 rounded-full",
-              isNext ? "bg-primary" : "bg-muted-foreground/45",
-            )}
-          />
-        </TooltipTrigger>
-        <TooltipPopup side="top">{positionLabel}</TooltipPopup>
-      </Tooltip>
       <div className="min-w-0 flex-1 text-sm/5">
         {text.length > 0 ? (
           <div className="whitespace-pre-wrap break-words text-foreground/90">{text}</div>
+        ) : null}
+        {isNext && message.holdUntilUserAction ? (
+          <div className="text-muted-foreground text-xs">Waiting for Send now</div>
         ) : null}
         {attachmentCount > 0 || contextCount > 0 ? (
           <div className={cn("text-muted-foreground text-xs", text.length > 0 && "mt-0.5")}>
@@ -206,7 +188,7 @@ function QueuedMessageRow({
           onPointerDown={(event) => event.preventDefault()}
           onClick={() => onSendNow(message.id)}
         >
-          Send Now
+          Send now
           {showEnterToSendHint ? (
             <Kbd className="h-4 min-w-4 px-0.5 text-[10px] leading-none">↵</Kbd>
           ) : null}
