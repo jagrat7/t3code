@@ -2,10 +2,11 @@
  * Devin ACP launch support.
  *
  * `devin acp` runs the Devin CLI as an Agent Client Protocol server over
- * stdio. Devin advertises a single `devin-browser` auth method; when CLI
- * credentials already exist (`devin auth login`) the `authenticate` request
- * resolves without interaction, so the same method id is correct for
- * headless use. Sign-in itself stays owned by `devin auth login` — T3 Code
+ * stdio. The ACP server self-authenticates from stored CLI credentials
+ * (`devin auth login`); answering `authenticate` with the advertised
+ * `devin-browser` method launches an interactive PKCE browser flow even
+ * when credentials exist, so no `authMethodId` is passed and the request
+ * is never sent. Sign-in stays owned by `devin auth login` — T3 Code
  * never opens a browser or collects API keys for Devin.
  */
 import type { DevinSettings } from "@t3tools/contracts";
@@ -17,8 +18,6 @@ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawne
 import * as EffectAcpErrors from "effect-acp/errors";
 
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
-
-export const DEVIN_ACP_AUTH_METHOD_ID = "devin-browser";
 
 type DevinAcpRuntimeDevinSettings = Pick<DevinSettings, "binaryPath">;
 
@@ -56,7 +55,6 @@ export const makeDevinAcpRuntime = (
       AcpSessionRuntime.layer({
         ...input,
         spawn: buildDevinAcpSpawnInput(input.devinSettings, input.cwd, input.environment),
-        authMethodId: DEVIN_ACP_AUTH_METHOD_ID,
       }).pipe(
         Layer.provide(
           Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, input.childProcessSpawner),
