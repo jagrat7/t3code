@@ -26,6 +26,7 @@ import {
   type ProviderInstance,
 } from "../ProviderDriver.ts";
 import { withInstanceIdentity } from "./instanceIdentity.ts";
+import { discoverDevinSkills } from "./DevinSkills.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import {
   makeCachedProviderMaintenanceResolution,
@@ -169,6 +170,29 @@ export const DevinDriver: ProviderDriver<DevinSettings, DevinDriverEnv> = {
         accentColor,
         enabled,
         snapshot,
+        snapshotForCwd: (cwd) =>
+          Effect.gen(function* () {
+            const current = yield* snapshot.getSnapshot;
+            if (!enabled || current.auth.status !== "authenticated") return current;
+            // The CLI resolves skill roots for the workspace itself, so the
+            // catalog reflects project-level skills and Devin environment
+            // overrides without T3 mirroring its layout.
+            const skills = yield* discoverDevinSkills(effectiveConfig, processEnv, cwd).pipe(
+              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+              Effect.provideService(Path.Path, path),
+            );
+            return { ...current, skills };
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderDriverError({
+                  driver: DRIVER_KIND,
+                  instanceId,
+                  detail: `Could not discover Devin skills for '${cwd}'.`,
+                  cause,
+                }),
+            ),
+          ),
         adapter,
         textGeneration,
       } satisfies ProviderInstance;

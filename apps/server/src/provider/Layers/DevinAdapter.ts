@@ -74,6 +74,7 @@ import {
 } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import { type DevinAcpRuntime, makeDevinAcpRuntime } from "../acp/DevinAcpSupport.ts";
+import { prepareDevinSkillPrompt } from "../Drivers/DevinSkills.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import type { ProviderAdapterError } from "../Errors.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -125,6 +126,7 @@ interface PendingUserInput {
 
 interface DevinSessionContext {
   readonly threadId: ThreadId;
+  readonly devinSettings: DevinSettings;
   session: ProviderSession;
   readonly scope: Scope.Closeable;
   readonly acp: DevinAcpRuntime;
@@ -745,6 +747,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
 
           ctx = {
             threadId: input.threadId,
+            devinSettings: effectiveDevinSettings,
             session,
             scope: sessionScope,
             acp,
@@ -1044,7 +1047,28 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
           }
           const rawPrompt = input.input?.trim() ?? "";
           if (rawPrompt) {
-            promptParts.push({ type: "text", text: rawPrompt });
+            // The composer inserts `$name` for every provider; `devin acp`
+            // invokes a skill through a leading `/name` slash command, so a
+            // known mention is rewritten and everything else stays literal.
+            const text = yield* prepareDevinSkillPrompt(
+              rawPrompt,
+              ctx.devinSettings,
+              options?.environment,
+              ctx.session.cwd ?? process.cwd(),
+            ).pipe(
+              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
+              Effect.provideService(Path.Path, path),
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "session/prompt",
+                    detail: cause.message,
+                    cause,
+                  }),
+              ),
+            );
+            promptParts.push({ type: "text", text });
           }
           // Generic files reach Devin through the path line ProviderService
           // puts in the prompt text, matching Cursor and Grok.
