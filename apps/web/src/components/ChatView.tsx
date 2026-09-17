@@ -6827,6 +6827,10 @@ export default function ChatView(props: ChatViewProps) {
       if (command === "thread.stop") {
         // An unavailable command should not shadow contextual shortcuts such as Escape to close a dialog.
         if (!canInterruptRunningThread) return;
+        // Escape is the shared dismiss key, so a binding on it arbitrates in
+        // the bubble phase (see the listener below) after dialogs, menus, and
+        // editors have had their claim. Other bindings interrupt immediately.
+        if (event.key === "Escape") return;
         event.preventDefault();
         event.stopPropagation();
         if (event.repeat) return;
@@ -6882,6 +6886,34 @@ export default function ChatView(props: ChatViewProps) {
     toggleTerminalVisibility,
     composerRef,
   ]);
+
+  // Escape is the shared dismiss key, so a thread.stop binding on it
+  // arbitrates last: this bubble listener interrupts only when nothing else
+  // consumed the key on the way up. Dialogs, menus, pickers, and inline
+  // editors mark it defaultPrevented; the capture handler above defers here.
+  useEffect(() => {
+    const handler = (event: globalThis.KeyboardEvent) => {
+      if (
+        event.key !== "Escape" ||
+        event.defaultPrevented ||
+        event.isComposing ||
+        event.repeat ||
+        document.fullscreenElement !== null ||
+        isCommandPaletteOpen() ||
+        !canInterruptRunningThread
+      ) {
+        return;
+      }
+      const command = resolveShortcutCommand(event, keybindings, {
+        context: getShortcutContext(),
+      });
+      if (command !== "thread.stop") return;
+      event.preventDefault();
+      void onInterrupt();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [canInterruptRunningThread, getShortcutContext, keybindings, onInterrupt]);
 
   // Paste-to-focus: the resting composer blurs on a click into the timeline,
   // so a paste that follows has no editable target and would be dropped.

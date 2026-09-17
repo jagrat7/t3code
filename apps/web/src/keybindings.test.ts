@@ -780,6 +780,29 @@ describe("resolveShortcutCommand", () => {
     );
   });
 
+  it("binds thread.stop to a bare Escape by default, except in a focused terminal", () => {
+    const input = event({ key: "Escape" });
+
+    assert.strictEqual(
+      resolveShortcutCommand(input, DEFAULT_RESOLVED_KEYBINDINGS, { platform: "MacIntel" }),
+      "thread.stop",
+    );
+    assert.isNull(
+      resolveShortcutCommand(input, DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+        context: { terminalFocus: true },
+      }),
+    );
+    // A modified Escape is not the default binding; only the bare key is.
+    assert.isNull(
+      resolveShortcutCommand(
+        event({ key: "Escape", metaKey: true }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "MacIntel" },
+      ),
+    );
+  });
+
   it("returns dynamic script commands", () => {
     const keybindings = compile([{ shortcut: modShortcut("r"), command: "script.setup.run" }]);
 

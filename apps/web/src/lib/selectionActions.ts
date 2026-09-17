@@ -120,6 +120,9 @@ export function observeSelectionActions({
   const onKeyDown = (event: KeyboardEvent) => {
     if (isActionTarget(event.target) && event.key !== "Escape") return;
     if (event.key === "Escape") {
+      // Only claim the key when a visible action element is dismissed; an
+      // idle Escape belongs to whatever else wants it (dialogs, thread.stop).
+      if (getActionElement?.()) event.preventDefault();
       dismiss();
     } else if (!pointerDown) {
       cancelPending();
