@@ -107,8 +107,11 @@ a shortcut.
 
 ## Commands with special behavior
 
-`thread.stop` interrupts the running turn in the focused thread. It has no default
-shortcut; assign one in **Settings → Keybindings**.
+`thread.stop` interrupts the running turn in the focused thread; the default
+shortcut is Escape. Escape still dismisses an open dialog, menu, or picker
+first — the turn is interrupted only when nothing else claims the key — and it
+never reaches a focused terminal. Remap or remove the binding in
+**Settings → Keybindings**.
 
 `chat.new` may ask you to choose a project when there is more than one.
 `chat.newLocal` skips that chooser. Both use your
