@@ -6953,10 +6953,8 @@ export default function ChatView(props: ChatViewProps) {
   // Escape stop shortcuts listen in the bubble phase so they only fire when no
   // dialog, menu, or inline editor claimed the key with preventDefault first.
   const stopFromEscape = useEffectEvent((event: globalThis.KeyboardEvent) => {
-    if (event.key !== "Escape" || event.isComposing || isCommandPaletteOpen()) return;
-    // ProseMirror prevents every Escape; composer menus that take it stop propagation instead.
-    const fromComposer = event.target instanceof Element && event.target.closest(".ProseMirror");
-    if (event.defaultPrevented && !fromComposer) return;
+    if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
+    if (isCommandPaletteOpen()) return;
     // The chat layout clears a sidebar multi-selection on Escape instead.
     if (useThreadSelectionStore.getState().selectedThreadKeys.size > 0) return;
     const command = resolveShortcutCommand(event, keybindings, {

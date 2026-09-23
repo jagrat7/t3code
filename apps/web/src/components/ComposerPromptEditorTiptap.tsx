@@ -799,6 +799,17 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
       editable: !disabled,
       editorProps: {
         attributes: editorAttributes,
+        handleDOMEvents: {
+          // ProseMirror prevents every Escape by default. Run the key handlers
+          // here so an Escape the editor ignores stays free for thread.stop.
+          keydown: (view, event) => {
+            if (event.key !== "Escape" || event.isComposing) return false;
+            if (view.someProp("handleKeyDown", (handle) => handle(view, event))) {
+              event.preventDefault();
+            }
+            return true;
+          },
+        },
         handleKeyDown: (view, event) => {
           if (
             isMacPlatform(navigator.platform) &&
