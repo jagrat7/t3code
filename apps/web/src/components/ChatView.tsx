@@ -155,6 +155,7 @@ import {
   type PendingUserInputDraftAnswer,
 } from "../pendingUserInput";
 import { useUiStateStore } from "../uiStateStore";
+import { useThreadSelectionStore } from "../threadSelectionStore";
 import {
   latestWorkspaceMutationId,
   useWorkspaceMutationRefresh,
@@ -6891,15 +6892,8 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
 
-      if (command === "thread.stop") {
-        // An unavailable command should not shadow contextual shortcuts such as Escape to close a dialog.
-        if (!canInterruptRunningThread) return;
-        event.preventDefault();
-        event.stopPropagation();
-        if (event.repeat) return;
-        void onInterrupt();
-        return;
-      }
+      // Stop waits for the bubble phase; see the listener below.
+      if (command === "thread.stop") return;
 
       const scriptId = projectScriptIdFromCommand(command);
       if (!scriptId || !activeProject) return;
@@ -6919,7 +6913,6 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadRef,
     activeThreadPinned,
     activeThreadSettled,
-    canInterruptRunningThread,
     activeThreadKey,
     terminalUiState.terminalOpen,
     terminalUiState.activeTerminalId,
@@ -6935,7 +6928,6 @@ export default function ChatView(props: ChatViewProps) {
     keybindings,
     handleUnsettleActiveThread,
     isServerThread,
-    onInterrupt,
     onToggleDiff,
     pinThread,
     settleThread,
@@ -6949,6 +6941,31 @@ export default function ChatView(props: ChatViewProps) {
     toggleTerminalVisibility,
     composerRef,
   ]);
+
+  // Stop listens in the bubble phase so its default Escape only fires when no
+  // dialog, menu, or inline editor claimed the key with preventDefault first.
+  useEffect(() => {
+    if (!canInterruptRunningThread) return;
+    const handler = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || isCommandPaletteOpen()) return;
+      // The chat layout clears a sidebar multi-selection on Escape instead.
+      if (
+        event.key === "Escape" &&
+        useThreadSelectionStore.getState().selectedThreadKeys.size > 0
+      ) {
+        return;
+      }
+      const command = resolveShortcutCommand(event, keybindings, {
+        context: getShortcutContext(event.target),
+      });
+      if (command !== "thread.stop") return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.repeat) void onInterrupt();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [canInterruptRunningThread, getShortcutContext, keybindings, onInterrupt]);
 
   // Paste-to-focus: the resting composer blurs on a click into the timeline,
   // so a paste that follows has no editable target and would be dropped.

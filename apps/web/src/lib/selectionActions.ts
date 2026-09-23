@@ -124,6 +124,8 @@ export function observeSelectionActions({
   const onKeyDown = (event: KeyboardEvent) => {
     if (isActionTarget(event.target) && event.key !== "Escape") return;
     if (event.key === "Escape") {
+      // A visible toolbar claims Escape so it does not also stop the thread.
+      if (getActionElement?.()) event.preventDefault();
       dismiss();
     } else if (!pointerDown) {
       cancelPending();

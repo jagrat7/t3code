@@ -246,9 +246,6 @@ describe("KeybindingsSettings.logic", () => {
         "script.setup-db.run",
       ]),
     );
-    expect(DEFAULT_RESOLVED_KEYBINDINGS.some((binding) => binding.command === "thread.stop")).toBe(
-      false,
-    );
   });
 
   it("reports unknown when variables without rejecting parseable expressions", () => {

@@ -86,6 +86,7 @@ function FileSearchField(props: {
         onChange={(event) => props.onValueChange(event.target.value)}
         onKeyDown={(event) => {
           if (event.key !== "Escape") return;
+          event.preventDefault();
           props.onClose();
           event.currentTarget.blur();
         }}

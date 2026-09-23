@@ -253,6 +253,27 @@ describe("thread undo shortcut", () => {
   });
 });
 
+describe("thread stop shortcut", () => {
+  it("resolves Escape outside terminals", () => {
+    assert.equal(
+      resolveShortcutCommand(event({ key: "Escape" }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+        context: { editableFocus: true },
+      }),
+      "thread.stop",
+    );
+  });
+
+  it("leaves Escape to a focused terminal", () => {
+    assert.isNull(
+      resolveShortcutCommand(event({ key: "Escape" }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "Win32",
+        context: { terminalFocus: true },
+      }),
+    );
+  });
+});
+
 describe("copy thread reference shortcut", () => {
   it("resolves Cmd+Shift+C on macOS and Ctrl+Shift+C elsewhere", () => {
     assert.equal(

@@ -140,19 +140,23 @@ export function useAssistantCitationTarget({
     if (!request) return;
     const dismiss = (onlyPending: boolean) => {
       const navigation = navigationRef.current;
-      if (!navigation || navigation.target.key !== request.key) return;
+      if (!navigation || navigation.target.key !== request.key) return false;
       const activation = navigation.target.activationRef.current;
-      if (activation.dismissed || (onlyPending && (activation.scrolled || navigation.done))) return;
+      if (activation.dismissed || (onlyPending && (activation.scrolled || navigation.done))) {
+        return false;
+      }
       activation.dismissed = true;
       activation.cancelScroll?.();
       if (!activation.scrolled && !navigation.done) onManualNavigation();
       navigation.done = true;
       setReady(null);
       setFinishedKey(request.key);
+      return true;
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        dismiss(false);
+        // Claim the key so dismissing a citation does not also stop the thread.
+        if (dismiss(false)) event.preventDefault();
       } else if (
         viewport?.contains(event.target as Node) &&
         ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)

@@ -108,8 +108,9 @@ a shortcut.
 
 ## Commands with special behavior
 
-`thread.stop` interrupts the running turn in the focused thread. It has no default
-shortcut; assign one in **Settings → Keybindings**.
+`thread.stop` (`escape` by default) interrupts the running turn in the focused
+thread. An open dialog, menu, or composer suggestion list takes Escape first, and
+a focused terminal keeps it.
 
 `thread.undo` (`mod+z` by default) reverses the actions shown in the notice at the
 bottom of the sidebar, such as unpin, settle, snooze, or archive. Consecutive
