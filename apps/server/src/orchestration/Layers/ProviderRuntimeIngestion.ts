@@ -34,6 +34,7 @@ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { formatTokens } from "@t3tools/shared/usageFormat";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { ProjectionThreadActivityRepository } from "../../persistence/Services/ProjectionThreadActivities.ts";
@@ -2592,6 +2593,31 @@ const make = Effect.gen(function* () {
           ),
         ),
       ).pipe(Effect.asVoid);
+
+      if (isTerminalTurn && shouldApplyThreadLifecycle && eventTurnId !== undefined) {
+        const requested = yield* McpSessionRegistry.finishActiveMcpTurn(thread.id, eventTurnId);
+        if (
+          requested &&
+          event.type === "turn.completed" &&
+          normalizeRuntimeTurnState(event.payload.state) === "completed"
+        ) {
+          yield* orchestrationEngine
+            .dispatch({
+              type: "thread.settle",
+              commandId: yield* providerCommandId(event, "agent-settle-thread"),
+              threadId: thread.id,
+            })
+            .pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("agent-requested thread settlement failed", {
+                  threadId: thread.id,
+                  turnId: eventTurnId,
+                  cause: Cause.pretty(cause),
+                }),
+              ),
+            );
+        }
+      }
     });
 
   const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;

@@ -91,6 +91,8 @@ without deleting the conversation. **Un-settle thread** restores it to active wo
 and prevents automatic settlement until new activity resumes the usual rules.
 Manually settling an idle thread dismisses unanswered async questions without
 sending an answer or restarting the agent.
+An agent can call `settle_thread` in T3 Code to settle its own thread when its current turn
+finishes. A failed or interrupted turn does not settle the thread.
 
 By default, environments settle inactive threads after three days and settle
 threads whose pull request merged. A closed pull request can also settle an idle
