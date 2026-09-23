@@ -119,14 +119,6 @@ function hasSameShortcutContext(left: KeybindingRule, right: KeybindingRule): bo
   return leftContext === rightContext;
 }
 
-// Backfilled defaults are appended and resolution is last-match, so a default
-// also conflicts with an unconditional rule on its key, which it would shadow.
-function defaultConflictsWithRule(defaultRule: KeybindingRule, entry: KeybindingRule): boolean {
-  if (hasSameShortcutContext(entry, defaultRule)) return true;
-  if (entry.when !== undefined) return false;
-  return hasSameShortcutContext(entry, { key: defaultRule.key, command: defaultRule.command });
-}
-
 function keybindingRuleFromUpsertInput(input: ServerUpsertKeybindingInput): KeybindingRule {
   return input.when === undefined
     ? { key: input.key, command: input.command }
@@ -491,7 +483,7 @@ const make = Effect.gen(function* () {
           continue;
         }
         const conflictingEntry = customConfig.find((entry) =>
-          defaultConflictsWithRule(defaultRule, entry),
+          hasSameShortcutContext(entry, defaultRule),
         );
         if (conflictingEntry) {
           shortcutConflictWarnings.push({
