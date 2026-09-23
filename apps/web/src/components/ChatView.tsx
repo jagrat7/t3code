@@ -6892,8 +6892,14 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
 
-      // Stop waits for the bubble phase; see the listener below.
-      if (command === "thread.stop") return;
+      if (command === "thread.stop") {
+        // Escape waits for the bubble phase below so dialogs and menus close first.
+        if (event.key === "Escape" || !canInterruptRunningThread) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) void onInterrupt();
+        return;
+      }
 
       const scriptId = projectScriptIdFromCommand(command);
       if (!scriptId || !activeProject) return;
@@ -6913,6 +6919,7 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadRef,
     activeThreadPinned,
     activeThreadSettled,
+    canInterruptRunningThread,
     activeThreadKey,
     terminalUiState.terminalOpen,
     terminalUiState.activeTerminalId,
@@ -6928,6 +6935,7 @@ export default function ChatView(props: ChatViewProps) {
     keybindings,
     handleUnsettleActiveThread,
     isServerThread,
+    onInterrupt,
     onToggleDiff,
     pinThread,
     settleThread,
@@ -6942,19 +6950,15 @@ export default function ChatView(props: ChatViewProps) {
     composerRef,
   ]);
 
-  // Stop listens in the bubble phase so its default Escape only fires when no
+  // Escape stop shortcuts listen in the bubble phase so they only fire when no
   // dialog, menu, or inline editor claimed the key with preventDefault first.
   useEffect(() => {
     if (!canInterruptRunningThread) return;
     const handler = (event: globalThis.KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing || isCommandPaletteOpen()) return;
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
+      if (isCommandPaletteOpen()) return;
       // The chat layout clears a sidebar multi-selection on Escape instead.
-      if (
-        event.key === "Escape" &&
-        useThreadSelectionStore.getState().selectedThreadKeys.size > 0
-      ) {
-        return;
-      }
+      if (useThreadSelectionStore.getState().selectedThreadKeys.size > 0) return;
       const command = resolveShortcutCommand(event, keybindings, {
         context: getShortcutContext(event.target),
       });

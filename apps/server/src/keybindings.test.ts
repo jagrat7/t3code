@@ -319,6 +319,24 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
     );
   });
 
+  it.effect("skips a conditional default that would shadow an unconditional rule", () =>
+    Effect.gen(function* () {
+      const { keybindingsConfigPath } = yield* ServerConfig.ServerConfig;
+      yield* writeKeybindingsConfig(keybindingsConfigPath, [
+        { key: "escape", command: "script.cancel-preview.run" },
+      ]);
+
+      yield* Effect.gen(function* () {
+        const keybindings = yield* Keybindings.Keybindings;
+        yield* keybindings.syncDefaultKeybindingsOnStartup;
+      });
+
+      const persisted = yield* readKeybindingsConfig(keybindingsConfigPath);
+      assert.isFalse(persisted.some((entry) => entry.command === "thread.stop"));
+      assert.isTrue(persisted.some((entry) => entry.command === "script.cancel-preview.run"));
+    }).pipe(Effect.provide(makeKeybindingsLayer())),
+  );
+
   it.effect("upserts custom keybindings to configured path", () =>
     Effect.gen(function* () {
       const { keybindingsConfigPath } = yield* ServerConfig.ServerConfig;
