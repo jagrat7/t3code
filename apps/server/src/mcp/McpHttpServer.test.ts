@@ -18,6 +18,7 @@ import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSna
 import * as ServerConfig from "../config.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
@@ -60,6 +61,17 @@ const PullRequestsTestLayer = McpHttpServer.PullRequestsToolkitRegistrationLive.
       }),
       Layer.mock(OrchestrationEngineService)({}),
       NodeServices.layer,
+    ),
+  ),
+);
+const ThreadsTestLayer = McpHttpServer.ThreadsToolkitRegistrationLive.pipe(
+  Layer.provideMerge(McpServer.McpServer.layer),
+  Layer.provide(
+    Layer.mergeAll(
+      Layer.mock(ProjectionSnapshotQuery)({
+        getThreadShellById: () => Effect.succeed(Option.none()),
+      }),
+      Layer.mock(McpSessionRegistry.McpSessionRegistry)({}),
     ),
   ),
 );
@@ -398,6 +410,25 @@ it.effect(
         { type: "text", text: "MCP credential does not grant the pull-requests capability." },
       ]);
     }).pipe(Effect.provide(PullRequestsTestLayer)),
+);
+
+it.effect("registers settle_thread for the calling agent's thread", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const tool = server.tools.find(({ tool }) => tool.name === "settle_thread");
+    expect(tool?.tool.annotations?.idempotentHint).toBe(true);
+    expect(tool?.tool.annotations?.readOnlyHint).toBe(false);
+    const denied = yield* server
+      .callTool({ name: "settle_thread", arguments: {} })
+      .pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+        Effect.provideService(McpSchema.McpServerClient, client),
+      );
+    expect(denied.isError).toBe(true);
+    expect(denied.content).toEqual([
+      { type: "text", text: "MCP credential does not grant the threads capability." },
+    ]);
+  }).pipe(Effect.provide(ThreadsTestLayer)),
 );
 
 it.effect("keeps the snapshot text under the agent's output ceiling", () =>

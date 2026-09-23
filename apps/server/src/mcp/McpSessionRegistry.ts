@@ -1,4 +1,4 @@
-import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { ProviderInstanceId, ThreadId, type TurnId } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -36,6 +36,8 @@ export interface McpSessionRegistryShape {
   readonly revokeProviderSession: (providerSessionId: string) => Effect.Effect<void>;
   readonly revokeThread: (threadId: ThreadId) => Effect.Effect<void>;
   readonly revokeAll: Effect.Effect<void>;
+  readonly requestSettleAfterTurn: (threadId: ThreadId, turnId: TurnId) => Effect.Effect<void>;
+  readonly finishTurn: (threadId: ThreadId, turnId: TurnId) => Effect.Effect<boolean>;
 }
 
 export class McpSessionRegistry extends Context.Service<
@@ -94,6 +96,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   const environmentId = yield* environment.getEnvironmentId;
   const httpServer = yield* HttpServer.HttpServer;
   const state = yield* SynchronizedRef.make<RegistryState>({ records: new Map() });
+  const settleRequests = yield* SynchronizedRef.make<ReadonlyMap<ThreadId, TurnId>>(new Map());
   const currentTimeMillis = options.now ? Effect.sync(options.now) : Clock.currentTimeMillis;
   const livenessWindowMs = options.livenessWindowMs ?? DEFAULT_LIVENESS_WINDOW_MS;
   const endpoint = NetAddress.isInetAddress(httpServer.address)
@@ -127,6 +130,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
         capabilities: new Set<McpInvocationContext.McpCapability>([
           "pull-requests",
+          "threads",
           ...request.capabilities,
         ]),
         issuedAt,
@@ -198,8 +202,25 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     ),
     revokeThread: Effect.fn("McpSessionRegistry.revokeThread")(function* (threadId) {
       yield* revokeWhere((record) => record.scope.threadId === threadId);
+      yield* SynchronizedRef.update(settleRequests, (requests) => {
+        const next = new Map(requests);
+        next.delete(threadId);
+        return next;
+      });
     }),
-    revokeAll: SynchronizedRef.set(state, { records: new Map() }),
+    revokeAll: Effect.all([
+      SynchronizedRef.set(state, { records: new Map() }),
+      SynchronizedRef.set(settleRequests, new Map()),
+    ]).pipe(Effect.asVoid),
+    requestSettleAfterTurn: (threadId, turnId) =>
+      SynchronizedRef.update(settleRequests, (requests) => new Map(requests).set(threadId, turnId)),
+    finishTurn: (threadId, turnId) =>
+      SynchronizedRef.modify(settleRequests, (requests) => {
+        if (requests.get(threadId) !== turnId) return [false, requests] as const;
+        const next = new Map(requests);
+        next.delete(threadId);
+        return [true, next] as const;
+      }),
   });
 });
 
@@ -244,6 +265,11 @@ export const revokeActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =
 
 export const revokeAllActiveMcpCredentials = (): Effect.Effect<void> =>
   activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeAll : Effect.void;
+
+export const finishActiveMcpTurn = (threadId: ThreadId, turnId: TurnId): Effect.Effect<boolean> =>
+  activeMcpSessionRegistry
+    ? activeMcpSessionRegistry.finishTurn(threadId, turnId)
+    : Effect.succeed(false);
 
 /** Exposed for tests. */
 export const __testing = {

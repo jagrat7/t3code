@@ -10,6 +10,7 @@ import {
   ProviderRuntimeEvent,
   ProviderSession,
   ProviderInstanceId,
+  EnvironmentId,
 } from "@t3tools/contracts";
 import {
   ApprovalRequestId,
@@ -37,6 +38,8 @@ import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
+import { HttpServer } from "effect/unstable/http";
+import * as NetAddress from "effect/unstable/net/NetAddress";
 import { it as effectIt } from "@effect/vitest";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
@@ -70,6 +73,8 @@ import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { makeSqlStatementCounter } from "../../../integration/SqlStatementCounter.integration.ts";
+import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 
 function makeTestServerSettingsLayer(overrides: Partial<ServerSettings> = {}) {
   return ServerSettingsService.layerTest(overrides);
@@ -240,7 +245,10 @@ async function waitForThread(
 
 describe("ProviderRuntimeIngestion", () => {
   let runtime: ManagedRuntime.ManagedRuntime<
-    OrchestrationEngineService | ProviderRuntimeIngestionService | ProjectionSnapshotQuery,
+    | OrchestrationEngineService
+    | ProviderRuntimeIngestionService
+    | ProjectionSnapshotQuery
+    | McpSessionRegistry.McpSessionRegistry,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -320,6 +328,27 @@ describe("ProviderRuntimeIngestion", () => {
       monotonicTimeNanos: realClock.monotonicTimeNanos,
       sleep: (duration) => realClock.sleep(duration),
     };
+    const mcpRegistryLayer = McpSessionRegistry.layer.pipe(
+      Layer.provide(
+        Layer.succeed(
+          HttpServer.HttpServer,
+          HttpServer.HttpServer.of({
+            address: NetAddress.inetAddressFromIpStringUnsafe("127.0.0.1", 43123),
+            serve: (() => Effect.void) as HttpServer.HttpServer["Service"]["serve"],
+          }),
+        ),
+      ),
+      Layer.provide(
+        Layer.succeed(
+          ServerEnvironment.ServerEnvironment,
+          ServerEnvironment.ServerEnvironment.of({
+            getEnvironmentId: Effect.succeed(EnvironmentId.make("environment-test")),
+            getDescriptor: Effect.die("unused"),
+          }),
+        ),
+      ),
+      Layer.provide(NodeServices.layer),
+    );
     const layer = ProviderRuntimeIngestionLive.pipe(
       Layer.provide(Layer.succeed(Clock.Clock, shiftedClock)),
       Layer.provideMerge(orchestrationLayer),
@@ -344,12 +373,16 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
       Layer.provideMerge(NodeServices.layer),
       Layer.provideMerge(Layer.succeed(Tracer.Tracer, sqlCounter.tracer)),
+      Layer.provideMerge(mcpRegistryLayer),
     );
     const testRuntime = ManagedRuntime.make(layer);
     runtime = testRuntime;
     const engine = await testRuntime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await testRuntime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const ingestion = await testRuntime.runPromise(Effect.service(ProviderRuntimeIngestionService));
+    const mcpRegistry = await testRuntime.runPromise(
+      Effect.service(McpSessionRegistry.McpSessionRegistry),
+    );
     scope = await Effect.runPromise(Scope.make("sequential"));
     await testRuntime.runPromise(ingestion.start().pipe(Scope.provide(scope)));
     const drain = () => testRuntime.runPromise(ingestion.drain);
@@ -415,6 +448,7 @@ describe("ProviderRuntimeIngestion", () => {
 
     return {
       engine,
+      mcpRegistry,
       dispatch,
       readModel: () => testRuntime.runPromise(snapshotQuery.getSnapshot()),
       readTurn: (turnId: TurnId) =>
@@ -480,6 +514,43 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("turn failed");
+  });
+
+  it.each([
+    { state: "completed" as const, settled: true },
+    { state: "failed" as const, settled: false },
+    { state: "interrupted" as const, settled: false },
+  ])("settles an agent-requested thread only after a $state turn", async ({ state, settled }) => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("agent-settle-turn");
+    await harness.emitAndDrain([
+      {
+        type: "turn.started",
+        eventId: asEventId(`agent-settle-start-${state}`),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        createdAt: "2026-01-01T00:00:01.000Z",
+        turnId,
+      },
+    ]);
+    expect((await harness.readThreadShell()).session?.status).toBe("running");
+    await Effect.runPromise(harness.mcpRegistry.requestSettleAfterTurn(threadId, turnId));
+    expect((await harness.readThreadShell()).settledOverride).toBe(null);
+
+    await harness.emitAndDrain([
+      {
+        type: "turn.completed",
+        eventId: asEventId(`agent-settle-finish-${state}`),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        createdAt: "2026-01-01T00:00:02.000Z",
+        turnId,
+        payload: { state },
+      },
+    ]);
+    expect((await harness.readThreadShell()).settledOverride).toBe(settled ? "settled" : null);
+    expect(await Effect.runPromise(harness.mcpRegistry.finishTurn(threadId, turnId))).toBe(false);
   });
 
   it.each([

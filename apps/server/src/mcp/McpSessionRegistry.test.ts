@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId, ThreadId, TurnId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { HttpServer } from "effect/unstable/http";
 import * as NetAddress from "effect/unstable/net/NetAddress";
@@ -56,7 +56,7 @@ it.effect("stores only a token hash, resolves the bearer token, and revokes by t
   }),
 );
 
-it.effect("always grants pull-requests and gates browser and device access independently", () =>
+it.effect("always grants thread and pull request tools, and gates browser and device access", () =>
   Effect.gen(function* () {
     const registry = yield* makeRegistry(() => 1_000);
     const withPreview = yield* registry.issue({
@@ -79,9 +79,25 @@ it.effect("always grants pull-requests and gates browser and device access indep
         .resolve(issued.config.authorizationHeader.replace(/^Bearer\s+/, ""))
         .pipe(Effect.map((scope) => [...(scope?.capabilities ?? [])].sort()));
 
-    expect(yield* capabilitiesOf(withPreview)).toEqual(["preview", "pull-requests"]);
-    expect(yield* capabilitiesOf(withoutPreview)).toEqual(["pull-requests"]);
-    expect(yield* capabilitiesOf(withDevice)).toEqual(["device", "pull-requests"]);
+    expect(yield* capabilitiesOf(withPreview)).toEqual(["preview", "pull-requests", "threads"]);
+    expect(yield* capabilitiesOf(withoutPreview)).toEqual(["pull-requests", "threads"]);
+    expect(yield* capabilitiesOf(withDevice)).toEqual(["device", "pull-requests", "threads"]);
+  }),
+);
+
+it.effect("keeps a settlement request tied to one turn and clears it on revocation", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const threadId = ThreadId.make("thread-1");
+    const first = TurnId.make("turn-1");
+    const second = TurnId.make("turn-2");
+    yield* registry.requestSettleAfterTurn(threadId, first);
+    expect(yield* registry.finishTurn(threadId, second)).toBe(false);
+    expect(yield* registry.finishTurn(threadId, first)).toBe(true);
+    expect(yield* registry.finishTurn(threadId, first)).toBe(false);
+    yield* registry.requestSettleAfterTurn(threadId, second);
+    yield* registry.revokeThread(threadId);
+    expect(yield* registry.finishTurn(threadId, second)).toBe(false);
   }),
 );
 
