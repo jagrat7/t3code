@@ -6952,24 +6952,25 @@ export default function ChatView(props: ChatViewProps) {
 
   // Escape stop shortcuts listen in the bubble phase so they only fire when no
   // dialog, menu, or inline editor claimed the key with preventDefault first.
+  const stopFromEscape = useEffectEvent((event: globalThis.KeyboardEvent) => {
+    if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
+    if (isCommandPaletteOpen()) return;
+    // The chat layout clears a sidebar multi-selection on Escape instead.
+    if (useThreadSelectionStore.getState().selectedThreadKeys.size > 0) return;
+    const command = resolveShortcutCommand(event, keybindings, {
+      context: getShortcutContext(event.target),
+    });
+    if (command !== "thread.stop") return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!event.repeat) void onInterrupt();
+  });
   useEffect(() => {
     if (!canInterruptRunningThread) return;
-    const handler = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
-      if (isCommandPaletteOpen()) return;
-      // The chat layout clears a sidebar multi-selection on Escape instead.
-      if (useThreadSelectionStore.getState().selectedThreadKeys.size > 0) return;
-      const command = resolveShortcutCommand(event, keybindings, {
-        context: getShortcutContext(event.target),
-      });
-      if (command !== "thread.stop") return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (!event.repeat) void onInterrupt();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [canInterruptRunningThread, getShortcutContext, keybindings, onInterrupt]);
+    const onKeyDown = (event: globalThis.KeyboardEvent) => stopFromEscape(event);
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [canInterruptRunningThread]);
 
   // Paste-to-focus: the resting composer blurs on a click into the timeline,
   // so a paste that follows has no editable target and would be dropped.
