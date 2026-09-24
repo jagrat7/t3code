@@ -235,8 +235,8 @@ describe("searchSettings", () => {
   });
 
   it("sends commands without a default binding to the section", () => {
-    expect(searchSettings("rightPanel.toggleMaximized")[0]).toMatchObject({
-      id: "keybinding-rightPanel.toggleMaximized",
+    expect(searchSettings("thread.stop")[0]).toMatchObject({
+      id: "keybinding-thread.stop",
       targetId: "keybindings",
     });
     expect(searchSettings("sidebar.toggle")[0]?.targetId).toBeUndefined();
