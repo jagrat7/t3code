@@ -301,6 +301,22 @@ function KeybindingConflictWarning({ labels }: { labels: ReadonlyArray<string> }
   );
 }
 
+/** Flags bare Escape bindings, since the composer also uses Escape to stop a running turn. */
+function ComposerEscapeWarning({
+  keyValue,
+  command,
+}: {
+  keyValue: string;
+  command: KeybindingCommand | "";
+}) {
+  if (keyValue !== "esc" || command === "thread.stop") return null;
+  return (
+    <WarningTooltipIcon label="Escape also stops a running turn">
+      The composer also uses Escape to stop a running turn.
+    </WarningTooltipIcon>
+  );
+}
+
 function WhenVariableSelect({
   value,
   variables,
@@ -1031,6 +1047,7 @@ function KeybindingSettingsRow(props: KeybindingRowProps) {
       control={
         <div className="flex flex-wrap items-center justify-end gap-1.5">
           <KeybindingConflictWarning labels={editor.conflictLabels} />
+          <ComposerEscapeWarning keyValue={editor.keyDraft} command={row.command} />
           <KeybindingHoverRowMenu
             row={row}
             isSaving={isSaving}
@@ -1247,6 +1264,7 @@ function NewKeybindingSettingsRow(props: NewKeybindingProps) {
             className="w-56"
           />
           <KeybindingConflictWarning labels={draft.conflictLabels} />
+          <ComposerEscapeWarning keyValue={draft.keyDraft} command={draft.commandDraft} />
           <NewKeybindingKeyInput draft={draft} className="w-44" />
           <Button size="sm" disabled={isSaving || !draft.canSave} onClick={draft.save}>
             {isSaving ? "Saving" : "Save"}

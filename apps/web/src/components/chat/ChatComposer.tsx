@@ -3999,9 +3999,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     const { trigger } = resolveActiveComposerTrigger();
     const menuIsActive = composerMenuOpenRef.current || trigger !== null;
     if (key === "Escape") {
-      if (!menuIsActive || event.isComposing || event.keyCode === 229) return false;
-      dismissComposerTrigger(trigger);
-      composerMenuOpenRef.current = false;
+      if (event.isComposing || event.keyCode === 229) return false;
+      // Like Enter, an open menu takes Escape first; otherwise it stops the running turn.
+      if (menuIsActive) {
+        dismissComposerTrigger(trigger);
+        composerMenuOpenRef.current = false;
+        return true;
+      }
+      if (phase !== "running") return false;
+      if (!event.repeat) onInterrupt();
       return true;
     }
     if (menuIsActive) {

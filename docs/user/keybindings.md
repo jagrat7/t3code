@@ -14,6 +14,9 @@ inserts a new line. This applies to the web and desktop composer at desktop widt
 use `mod+Shift+Enter` for the opposite action. In a new thread, `mod+Enter` keeps
 starting the thread in the background.
 
+While the agent runs, press Escape in the composer to stop it. If a suggestion
+menu is open, Escape closes the menu first.
+
 Use `mod+shift+m` to choose a model and `mod+shift+h` to choose a host.
 Use `mod+shift+e` for effort, `mod+shift+a` for access mode, `mod+shift+x` for the
 workspace, and `mod+shift+g` for the Git branch. The workspace menu includes the
