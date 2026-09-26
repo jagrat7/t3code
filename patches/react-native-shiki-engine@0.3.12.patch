@@ -2,7 +2,7 @@ diff --git a/android/CMakeLists.txt b/android/CMakeLists.txt
 index 4e4c88b..698f941 100644
 --- a/android/CMakeLists.txt
 +++ b/android/CMakeLists.txt
-@@ -3,13 +3,16 @@ project(ReactNativeShikiEngine)
+@@ -3,13 +3,15 @@ project(ReactNativeShikiEngine)
  
  set(CMAKE_VERBOSE_MAKEFILE ON)
  

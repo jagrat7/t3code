@@ -4,6 +4,7 @@ import * as NodeFS from "node:fs";
 
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
+import * as Schema from "effect/Schema";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
@@ -11,6 +12,8 @@ import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as EffectAcpAgent from "effect-acp/agent";
 import * as AcpError from "effect-acp/errors";
 import type * as AcpSchema from "effect-acp/schema";
+
+const encodeUnknownJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 const requestLogPath = process.env.T3_ACP_REQUEST_LOG_PATH;
 const exitLogPath = process.env.T3_ACP_EXIT_LOG_PATH;
@@ -64,6 +67,8 @@ const advertisedModelIds = process.env.T3_ACP_MODEL_IDS?.split(",")
 const promptResponseText = process.env.T3_ACP_PROMPT_RESPONSE_TEXT;
 const initialGrokReasoningEffort =
   process.env.T3_ACP_INITIAL_GROK_REASONING_EFFORT?.trim() || undefined;
+const firstPromptGate = process.env.T3_ACP_FIRST_PROMPT_GATE;
+const emitElicitation = process.env.T3_ACP_EMIT_ELICITATION === "1";
 const promptDelayMs = Number(process.env.T3_ACP_PROMPT_DELAY_MS ?? "0");
 const permissionOptionIds = {
   allowOnce: process.env.T3_ACP_ALLOW_ONCE_OPTION_ID ?? "allow-once",
@@ -385,6 +390,7 @@ function modelState(): AcpSchema.SessionModelState {
 
 const program = Effect.gen(function* () {
   const agent = yield* EffectAcpAgent.AcpAgent;
+  const firstPromptRelease = yield* Deferred.make<void>();
   const resumeRelease = yield* Deferred.make<void>();
   const nativeCancelRequested = yield* Deferred.make<void>();
   const nativeCancelRelease = yield* Deferred.make<void>();
@@ -433,6 +439,7 @@ const program = Effect.gen(function* () {
           ...(imageCapability
             ? { promptCapabilities: { image: true, embeddedContext: true } }
             : {}),
+          ...(process.env.T3_ACP_MCP_HTTP === "1" ? { mcpCapabilities: { http: true } } : {}),
           ...(devinMcpExtension
             ? {
                 mcpCapabilities: { http: false, sse: false },
@@ -469,7 +476,7 @@ const program = Effect.gen(function* () {
 
   yield* agent.handleCreateSession(() =>
     Effect.gen(function* () {
-      if (antigravityProfile) {
+      if (antigravityProfile || process.env.T3_ACP_EMIT_COMMANDS === "1") {
         yield* publishAntigravityCommands(sessionId);
       }
       return {
@@ -590,6 +597,10 @@ const program = Effect.gen(function* () {
           process.exit(7);
         });
       }
+      if (firstPromptGate === "failed-config" && promptCount > 0) {
+        yield* Deferred.succeed(firstPromptRelease, undefined);
+        return yield* AcpError.AcpRequestError.invalidParams("Follow-up configuration failed");
+      }
       if (failSetConfigOption) {
         return yield* AcpError.AcpRequestError.invalidParams(
           "Mock invalid params for session/set_config_option",
@@ -633,6 +644,7 @@ const program = Effect.gen(function* () {
     Effect.gen(function* () {
       const cancelledSessionId = String(sessionId ?? "mock-session-1");
       cancelledSessions.add(cancelledSessionId);
+      if (firstPromptGate === "cancel") yield* Deferred.succeed(firstPromptRelease, undefined);
       if (completeFirstPromptOnCancel) {
         yield* Deferred.succeed(nativeCancelRequested, undefined);
         yield* agent.client.sessionUpdate({
@@ -663,6 +675,55 @@ const program = Effect.gen(function* () {
       const requestedSessionId = String(request.sessionId ?? sessionId);
       promptCount += 1;
 
+      if (firstPromptGate === "cancel" || (firstPromptGate && promptCount === 1)) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "agent_thought_chunk",
+            content: {
+              type: "text",
+              text:
+                firstPromptGate === "cancel" ? `prompt-waiting-${promptCount}` : "prompt-waiting",
+            },
+          },
+        });
+        yield* Deferred.await(firstPromptRelease);
+        if (firstPromptGate === "cancel") return { stopReason: "cancelled" };
+      } else if (firstPromptGate === "second-prompt" || firstPromptGate === "failed-steer") {
+        yield* Deferred.succeed(firstPromptRelease, undefined);
+        if (firstPromptGate === "failed-steer")
+          return yield* AcpError.AcpRequestError.internalError("Steering failed");
+      }
+      if (emitElicitation) {
+        const response = yield* agent.client.elicit({
+          sessionId: requestedSessionId,
+          mode: "form",
+          message: "Choose a deployment target",
+          requestedSchema: {
+            type: "object",
+            required: ["target"],
+            properties: {
+              target: {
+                type: "string",
+                oneOf: [
+                  { const: "staging", title: "Staging" },
+                  { const: "production", title: "Production" },
+                ],
+              },
+            },
+          },
+        });
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: {
+              type: "text",
+              text: yield* encodeUnknownJson(response).pipe(Effect.orDie),
+            },
+          },
+        });
+      }
       if (exitOnPrompt) {
         // Simulate the agent process dying mid-turn: the prompt RPC never
         // gets a response and the transport drops.

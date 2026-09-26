@@ -19,6 +19,7 @@ import {
   checkDevinProviderStatus,
   enrichDevinSnapshot,
 } from "../Layers/DevinProvider.ts";
+import { makeAcpCommandCatalog } from "../acp/AcpCommandCatalog.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
   defaultProviderContinuationIdentity,
@@ -116,11 +117,6 @@ export const DevinDriver: ProviderDriver<DevinSettings, DevinDriverEnv> = {
         ),
       );
 
-      const adapter = yield* makeDevinAdapter(effectiveConfig, {
-        environment: processEnv,
-        ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
-        instanceId,
-      });
       const textGeneration = yield* makeDevinTextGeneration(effectiveConfig, processEnv);
 
       const checkProvider = checkDevinProviderStatus(effectiveConfig, processEnv).pipe(
@@ -130,7 +126,9 @@ export const DevinDriver: ProviderDriver<DevinSettings, DevinDriverEnv> = {
       );
 
       const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);
-      const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<DevinSettings>>({
+      const managedSnapshot = yield* makeManagedServerProvider<
+        ProviderSnapshotSettings<DevinSettings>
+      >({
         resolveMaintenance,
         getSettings: snapshotSettings.getSettings,
         streamSettings: snapshotSettings.streamSettings,
@@ -162,6 +160,23 @@ export const DevinDriver: ProviderDriver<DevinSettings, DevinDriverEnv> = {
         ),
       );
 
+      const { snapshot, onAvailableCommands, snapshotForCwd } =
+        yield* makeAcpCommandCatalog(managedSnapshot);
+      const discoverSkills = (cwd: string) =>
+        discoverDevinSkills(effectiveConfig, processEnv, cwd).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.provideService(Path.Path, path),
+        );
+      const adapter = yield* makeDevinAdapter(effectiveConfig, {
+        environment: processEnv,
+        ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
+        instanceId,
+        onAvailableCommands: (commands, cwd) =>
+          discoverSkills(cwd).pipe(
+            Effect.catch(() => Effect.succeed([])),
+            Effect.flatMap((skills) => onAvailableCommands(commands, cwd, skills)),
+          ),
+      });
       return {
         instanceId,
         driverKind: DRIVER_KIND,
@@ -177,11 +192,8 @@ export const DevinDriver: ProviderDriver<DevinSettings, DevinDriverEnv> = {
             // The CLI resolves skill roots for the workspace itself, so the
             // catalog reflects project-level skills and Devin environment
             // overrides without T3 mirroring its layout.
-            const skills = yield* discoverDevinSkills(effectiveConfig, processEnv, cwd).pipe(
-              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-              Effect.provideService(Path.Path, path),
-            );
-            return { ...current, skills };
+            const skills = yield* discoverSkills(cwd);
+            return yield* snapshotForCwd(cwd, skills);
           }).pipe(
             Effect.mapError(
               (cause) =>

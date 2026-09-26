@@ -626,19 +626,21 @@ function useThreadSettingsCatalogItems(
                   session.isDisplayed(model) ||
                   session.favoriteKeys.has(model.key),
               );
-        const visibleModels = collapseFusionOptions(favoritesFirst(
-          catalogModels.filter(
-            (model) =>
-              (session.providerFilter !== FAVORITES_PROVIDER_FILTER ||
-                session.favoriteKeys.has(model.key)) &&
-              modelMatchesCatalogQuery({
-                model,
-                providerLabel: group.providerLabel,
-                query: session.searchQuery,
-              }),
+        const visibleModels = collapseFusionOptions(
+          favoritesFirst(
+            catalogModels.filter(
+              (model) =>
+                (session.providerFilter !== FAVORITES_PROVIDER_FILTER ||
+                  session.favoriteKeys.has(model.key)) &&
+                modelMatchesCatalogQuery({
+                  model,
+                  providerLabel: group.providerLabel,
+                  query: session.searchQuery,
+                }),
+            ),
+            session.favoriteKeys,
           ),
-          session.favoriteKeys,
-        ), session.isDisplayed,
+          session.isDisplayed,
         );
         if (visibleModels.length === 0) {
           return [];

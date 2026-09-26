@@ -30,6 +30,12 @@ the capabilities granted to that environment.
 
 ## Sessions and remote use
 
+Use **Plan** to discuss a change before implementing it. Choose **Auto**,
+**Auto-accept edits**, or **Full access** for coding. **Supervised** requires
+an installed Devin CLI that exposes supervised coding; T3 Code reports an
+error when it is unavailable. Devin's read-only Ask mode cannot approve and
+apply changes.
+
 T3 Code forwards permission requests and supports cancellation, images, file
 attachments, and automatic context compaction through `/compact`. Conversation
 rewind is unavailable because Devin ACP cannot restore an earlier point in a

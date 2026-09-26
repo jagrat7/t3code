@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderInstanceId, ThreadId, ProviderDriverKind } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -96,6 +96,47 @@ it.layer(driverTestLayer)("DevinDriver workspace snapshots", (it) => {
           userInvocationOnly: true,
           displayName: "Visual check",
         });
+      }),
+    ),
+  );
+
+  it.effect("publishes session commands with workspace skills across refreshes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cli = yield* makeDevinCli({
+          T3_DEVIN_AUTH_STATUS: "Logged in (via Devin).",
+          T3_ACP_EMIT_COMMANDS: "1",
+        });
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const workspace = yield* fs.makeTempDirectoryScoped({ prefix: "t3-devin-commands-" });
+        yield* fs.writeFileString(path.join(workspace, "devin-test-skills.json"), devinTestSkills);
+        const instance = yield* DevinDriver.create({
+          instanceId: ProviderInstanceId.make("devin"),
+          displayName: undefined,
+          environment: [],
+          enabled: true,
+          config: cli.settings,
+        });
+        const threadId = ThreadId.make("devin-native-commands");
+        yield* instance.adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: workspace,
+          runtimeMode: "full-access",
+        });
+        yield* instance.snapshot.refresh;
+        const snapshot = yield* instance.snapshotForCwd!(workspace);
+        expect(snapshot.slashCommands.map((command) => command.name)).toEqual([
+          "compact",
+          "plan",
+          "logout",
+        ]);
+        expect(snapshot.skills.map((skill) => skill.name)).toContain("visual-check");
+        expect(
+          snapshot.workspaceSnapshots?.find((entry) => entry.cwd === workspace)?.slashCommands,
+        ).toEqual(snapshot.slashCommands);
+        yield* instance.adapter.stopSession(threadId);
       }),
     ),
   );

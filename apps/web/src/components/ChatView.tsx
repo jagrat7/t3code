@@ -9291,7 +9291,11 @@ export default function ChatView(props: ChatViewProps) {
   );
 
   const onProviderModelSelect = useCallback(
-    (instanceId: ProviderInstanceId, model: string, options?: { focusComposer?: boolean; modelOptions?: ReadonlyArray<ProviderOptionSelection> }) => {
+    (
+      instanceId: ProviderInstanceId,
+      model: string,
+      options?: { focusComposer?: boolean; modelOptions?: ReadonlyArray<ProviderOptionSelection> },
+    ) => {
       if (!activeThread) return;
       // Look up the configured instance so model normalization and custom
       // model lookup stay scoped to that exact instance. Unknown instance ids

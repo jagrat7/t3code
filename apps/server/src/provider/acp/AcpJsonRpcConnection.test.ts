@@ -136,6 +136,46 @@ describe("AcpSessionRuntime", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("cancels and drains every concurrent prompt", () =>
+    Effect.gen(function* () {
+      const firstReady = yield* Deferred.make<void>();
+      const secondReady = yield* Deferred.make<void>();
+      const runtime = yield* AcpSessionRuntime.make({
+        ...mockRuntimeOptions,
+        spawn: {
+          ...mockRuntimeOptions.spawn,
+          env: { ...process.env, T3_ACP_FIRST_PROMPT_GATE: "cancel" },
+        },
+        concurrentPrompts: true,
+        cancelBehavior: "wait-for-prompt",
+      });
+      yield* runtime.getEvents().pipe(
+        Stream.runForEach((event) => {
+          if (event._tag === "EventStreamBarrier")
+            return Deferred.succeed(event.acknowledge, undefined);
+          if (event._tag === "ThoughtDelta") {
+            if (event.text === "prompt-waiting-1") return Deferred.succeed(firstReady, undefined);
+            if (event.text === "prompt-waiting-2") return Deferred.succeed(secondReady, undefined);
+          }
+          return Effect.void;
+        }),
+        Effect.forkChild,
+      );
+      yield* runtime.start();
+      const first = yield* runtime
+        .prompt({ prompt: [{ type: "text", text: "first" }] })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(firstReady);
+      const second = yield* runtime
+        .prompt({ prompt: [{ type: "text", text: "second" }] })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(secondReady);
+      yield* runtime.cancel;
+      expect((yield* Fiber.join(first)).stopReason).toBe("cancelled");
+      expect((yield* Fiber.join(second)).stopReason).toBe("cancelled");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("waits for native cancellation and drains final updates before another prompt", () =>
     Effect.gen(function* () {
       const toolStarted = yield* Deferred.make<void>();

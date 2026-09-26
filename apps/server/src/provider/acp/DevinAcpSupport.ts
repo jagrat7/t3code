@@ -28,10 +28,8 @@ import { spawnAndCollect } from "../providerSnapshot.ts";
 import type { McpProviderSessionConfig } from "../../mcp/McpProviderSession.ts";
 
 /**
- * Devin advertises its MCP extension through `agentCapabilities._meta`
- * rather than the standard `mcpCapabilities` (which it reports as
- * `{ http: false, sse: false }`). Sessions without it do not understand
- * `_cognition.ai/mcp/connectServer`.
+ * Older Devin CLIs advertise their private MCP extension through
+ * `agentCapabilities._meta`. Prefer standard HTTP MCP when available.
  */
 export const devinSupportsMcpExtension = (
   initializeResult: Pick<
@@ -46,9 +44,9 @@ const decodeMcpConnected = Schema.decodeUnknownEffect(
 );
 
 /**
- * Devin resolves MCP tools from `.devin/mcp_config.local.json` inside its
- * session roots instead of the ACP `mcpServers` field, so the T3 Code
- * credential travels as a scoped config file plus the
+ * Legacy Devin CLIs resolve MCP tools from `.devin/mcp_config.local.json`
+ * inside their session roots. For those versions the T3 Code credential
+ * travels as a scoped config file plus the
  * `_cognition.ai/mcp/connectServer` extension request. The directory is
  * bound to the provided scope so the token-bearing file dies with the
  * session.
@@ -188,7 +186,10 @@ export const makeDevinAcpRuntime = (
       AcpSessionRuntime.layer({
         ...input,
         spawn: buildDevinAcpSpawnInput(input.devinSettings, input.cwd, input.environment),
+        concurrentPrompts: true,
+        cancelBehavior: "wait-for-prompt",
         clientCapabilities: {
+          elicitation: { form: {} },
           _meta: { "cognition.ai/mcp": true, "cognition.ai/mcpWorkspaceDirs": true },
         },
         // ACP's cached model choices can omit valid Fusion IDs indefinitely.

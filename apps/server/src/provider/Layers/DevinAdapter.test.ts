@@ -38,6 +38,7 @@ import { DevinSkillCatalog } from "../Drivers/DevinSkills.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+const decodeUnknownJson = Schema.decodeEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeDevinSettings = Schema.decodeSync(DevinSettings);
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 const encodeUnknownJsonString = (value: unknown): string => {
@@ -487,12 +488,7 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
         promptRequests.map(
           (request) => (request.params as Record<string, unknown> | undefined)?.prompt,
         ),
-        [
-          [
-            { type: "text", text: "/check please  the page" },
-            { type: "text", text: buildRuntimeInstructions({ harness: "Devin" }) },
-          ],
-        ],
+        [[{ type: "text", text: "/check please  the page" }]],
       );
 
       yield* adapter.stopSession(threadId);
@@ -561,10 +557,11 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
       const argvLogPath = NodePath.join(tempDir, "argv.txt");
       yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
 
-      // Keep the first prompt in flight long enough for the second sendTurn
-      // to race it.
+      // The first prompt cannot finish until the second reaches the agent.
       const wrapperPath = yield* Effect.promise(() =>
-        makeProbeWrapper(requestLogPath, argvLogPath, { T3_ACP_PROMPT_DELAY_MS: "1500" }),
+        makeProbeWrapper(requestLogPath, argvLogPath, {
+          T3_ACP_FIRST_PROMPT_GATE: "second-prompt",
+        }),
       );
       yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
 
@@ -583,6 +580,15 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
         runtimeMode: "full-access",
       });
 
+      const promptReady = yield* Deferred.make<void>();
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.threadId === threadId &&
+        event.type === "content.delta" &&
+        event.payload.delta === "prompt-waiting"
+          ? Deferred.succeed(promptReady, undefined)
+          : Effect.void,
+      ).pipe(Effect.forkChild);
+
       const firstTurnFiber = yield* adapter
         .sendTurn({
           threadId,
@@ -591,21 +597,7 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
         })
         .pipe(Effect.forkChild);
 
-      // Poll until the first prompt is in flight — sendTurn binds the active
-      // turn id before prompting. The mock agent runs on the real clock, so
-      // each TestClock.adjust just provides the scheduler hops for its stdio
-      // responses to land.
-      yield* Effect.gen(function* () {
-        for (let attempt = 0; attempt < 200; attempt += 1) {
-          const sessions = yield* adapter.listSessions();
-          const session = sessions.find((entry) => entry.threadId === threadId);
-          if (session?.activeTurnId !== undefined) {
-            return;
-          }
-          yield* TestClock.adjust("10 millis");
-        }
-        throw new Error("Timed out waiting for the first prompt to be in flight.");
-      });
+      yield* Deferred.await(promptReady);
 
       const steeredTurn = yield* adapter.sendTurn({
         threadId,
@@ -639,6 +631,179 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
       yield* adapter.stopSession(threadId);
     }),
   );
+
+  it.effect("settles the original turn when follow-up configuration fails", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("devin-failed-follow-up");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_FIRST_PROMPT_GATE: "failed-config" }),
+      );
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+      const promptReady = yield* Deferred.make<void>();
+      const completed = yield* Deferred.make<ProviderRuntimeEvent>();
+      yield* Stream.runForEach(adapter.streamEvents, (event) => {
+        if (event.threadId !== threadId) return Effect.void;
+        if (event.type === "content.delta" && event.payload.delta === "prompt-waiting")
+          return Deferred.succeed(promptReady, undefined);
+        if (event.type === "turn.completed") return Deferred.succeed(completed, event);
+        return Effect.void;
+      }).pipe(Effect.forkChild);
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const original = yield* adapter
+        .sendTurn({ threadId, input: "start working" })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(promptReady);
+      const error = yield* adapter
+        .sendTurn({ threadId, input: "change plan", interactionMode: "plan" })
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+      const first = yield* Fiber.join(original);
+      const event = yield* Deferred.await(completed);
+      assert.equal(event.turnId, first.turnId);
+      assert.equal(
+        (yield* adapter.listSessions()).find((session) => session.threadId === threadId)
+          ?.activeTurnId,
+        undefined,
+      );
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("reports a failed concurrent prompt even when the other prompt succeeds", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("devin-failed-concurrent-prompt");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_FIRST_PROMPT_GATE: "failed-steer" }),
+      );
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+      const promptReady = yield* Deferred.make<void>();
+      const completed = yield* Deferred.make<ProviderRuntimeEvent>();
+      yield* Stream.runForEach(adapter.streamEvents, (event) => {
+        if (event.threadId !== threadId) return Effect.void;
+        if (event.type === "content.delta" && event.payload.delta === "prompt-waiting")
+          return Deferred.succeed(promptReady, undefined);
+        if (event.type === "turn.completed") return Deferred.succeed(completed, event);
+        return Effect.void;
+      }).pipe(Effect.forkChild);
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const original = yield* adapter
+        .sendTurn({ threadId, input: "start working" })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(promptReady);
+      const error = yield* adapter
+        .sendTurn({ threadId, input: "change plan", interactionMode: "default" })
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+      const first = yield* Fiber.join(original);
+      const event = yield* Deferred.await(completed);
+      assert.equal(event.turnId, first.turnId);
+      assert.equal(event.type, "turn.completed");
+      if (event.type === "turn.completed") assert.equal(event.payload.state, "failed");
+      assert.equal(
+        (yield* adapter.listSessions()).find((session) => session.threadId === threadId)
+          ?.activeTurnId,
+        undefined,
+      );
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("rejects supervised coding when only read-only Ask is available", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("devin-unsupported-supervised");
+      const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+      const error = yield* adapter
+        .startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "approval-required",
+        })
+        .pipe(Effect.flip);
+      assert.include(error.message, "Ask mode is read-only");
+      assert.isFalse(yield* adapter.hasSession(threadId));
+    }),
+  );
+
+  for (const cancel of [false, true]) {
+    it.effect(
+      cancel
+        ? "cancels pending Devin questions on interrupt"
+        : "delivers structured answers back to Devin",
+      () =>
+        Effect.gen(function* () {
+          const adapter = yield* DevinAdapter;
+          const settings = yield* ServerSettingsService;
+          const threadId = ThreadId.make(`devin-question-${cancel}`);
+          const wrapperPath = yield* Effect.promise(() =>
+            makeMockAgentWrapper({ T3_ACP_EMIT_ELICITATION: "1" }),
+          );
+          yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+          const question =
+            yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "user-input.requested" }>>();
+          const events: Array<ProviderRuntimeEvent> = [];
+          yield* Stream.runForEach(adapter.streamEvents, (event) => {
+            if (event.threadId !== threadId) return Effect.void;
+            events.push(event);
+            return event.type === "user-input.requested"
+              ? Deferred.succeed(question, event)
+              : Effect.void;
+          }).pipe(Effect.forkChild);
+          yield* adapter.startSession({
+            threadId,
+            provider: ProviderDriverKind.make("devin"),
+            cwd: process.cwd(),
+            runtimeMode: "full-access",
+          });
+          const turn = yield* adapter
+            .sendTurn({ threadId, input: "deploy" })
+            .pipe(Effect.forkChild);
+          const request = yield* Deferred.await(question);
+          assert.deepStrictEqual(
+            request.payload.questions[0]?.options.map((option) => option.value),
+            ["staging", "production"],
+          );
+          if (cancel) yield* adapter.interruptTurn(threadId);
+          else
+            yield* adapter.respondToUserInput(
+              threadId,
+              ApprovalRequestId.make(request.requestId!),
+              { target: "staging" },
+            );
+          yield* Fiber.join(turn);
+          const response = events.find(
+            (event) => event.type === "content.delta" && event.payload.delta.includes('"action"'),
+          );
+          assert.isDefined(response);
+          if (response?.type === "content.delta")
+            assert.deepStrictEqual(
+              yield* decodeUnknownJson(response.payload.delta),
+              cancel
+                ? { action: { action: "cancel" } }
+                : { action: { action: "accept", content: { target: "staging" } } },
+            );
+          assert.isTrue(events.some((event) => event.type === "user-input.resolved"));
+          yield* adapter.stopSession(threadId);
+        }),
+    );
+  }
 
   it.effect("auto-approves Devin permission requests in full-access mode", () =>
     Effect.gen(function* () {
@@ -763,7 +928,7 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
     }),
   );
 
-  it.effect("maps supervised mode onto Devin's ask session mode", () =>
+  it.effect("uses a supervised coding mode only when Devin advertises it", () =>
     Effect.gen(function* () {
       const adapter = yield* DevinAdapter;
       const settings = yield* ServerSettingsService;
@@ -776,7 +941,9 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
       yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
 
       const wrapperPath = yield* Effect.promise(() =>
-        makeProbeWrapper(requestLogPath, argvLogPath),
+        makeProbeWrapper(requestLogPath, argvLogPath, {
+          T3_ACP_MODE_IDS: "normal,code,architect,bypass,smart",
+        }),
       );
       yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
 
@@ -786,10 +953,7 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
         cwd: process.cwd(),
         runtimeMode: "approval-required",
       });
-      // The mock's session already starts in `ask`, so setMode is a no-op
-      // until another mode is applied. A plan turn moves to `architect`,
-      // then the next default turn must resolve back to `ask` — never the
-      // edit-accepting `code` mode, which would silently approve edits.
+      // Plan mode must return to supervised coding for the next default turn.
       yield* adapter.sendTurn({
         threadId,
         input: "plan this change",
@@ -811,13 +975,14 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
       };
       const requests = yield* waitForJsonLogMatch(
         requestLogPath,
-        (entry) => isModeUpdate(entry) && (entry.params as Record<string, unknown>).value === "ask",
+        (entry) =>
+          isModeUpdate(entry) && (entry.params as Record<string, unknown>).value === "normal",
       );
       const modeValues = requests
         .filter(isModeUpdate)
         .map((entry) => (entry.params as Record<string, unknown>).value);
       assert.include(modeValues, "architect");
-      assert.include(modeValues, "ask");
+      assert.include(modeValues, "normal");
       assert.notInclude(modeValues, "code");
 
       yield* adapter.stopSession(threadId);
@@ -837,7 +1002,11 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
       yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
 
       const wrapperPath = yield* Effect.promise(() =>
-        makeProbeWrapper(requestLogPath, argvLogPath, { T3_ACP_EMIT_TOOL_CALLS: "1" }),
+        makeProbeWrapper(requestLogPath, argvLogPath, {
+          T3_ACP_EMIT_TOOL_CALLS: "1",
+          T3_ACP_ALLOW_ONCE_OPTION_ID: "devin-approve-this-command",
+          T3_ACP_MODE_IDS: "normal,code,architect,bypass,smart",
+        }),
       );
       yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
 
@@ -893,7 +1062,9 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
         typeof entry.result.outcome === "object" &&
         entry.result.outcome !== null &&
         "outcome" in entry.result.outcome &&
-        entry.result.outcome.outcome === "selected";
+        entry.result.outcome.outcome === "selected" &&
+        "optionId" in entry.result.outcome &&
+        entry.result.outcome.optionId === "devin-approve-this-command";
       const permissionResponses = yield* waitForJsonLogMatch(
         requestLogPath,
         isSelectedPermissionResponse,
@@ -916,7 +1087,10 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
       const argvLogPath = NodePath.join(tempDir, "argv.txt");
       yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
       const wrapperPath = yield* Effect.promise(() =>
-        makeProbeWrapper(requestLogPath, argvLogPath, { T3_ACP_EMIT_TOOL_CALLS: "1" }),
+        makeProbeWrapper(requestLogPath, argvLogPath, {
+          T3_ACP_EMIT_TOOL_CALLS: "1",
+          T3_ACP_MODE_IDS: "normal,code,architect,bypass,smart",
+        }),
       );
       yield* serverSettings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
 
@@ -1007,7 +1181,10 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
       const approvalRequested = yield* Deferred.make<void>();
 
       const wrapperPath = yield* Effect.promise(() =>
-        makeMockAgentWrapper({ T3_ACP_EMIT_TOOL_CALLS: "1" }),
+        makeMockAgentWrapper({
+          T3_ACP_EMIT_TOOL_CALLS: "1",
+          T3_ACP_MODE_IDS: "normal,code,architect,bypass,smart",
+        }),
       );
       yield* serverSettings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
 
@@ -1935,7 +2112,7 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
           | Record<string, unknown>
           | undefined
       )?.prompt as Array<Record<string, unknown>> | undefined;
-      assert.deepStrictEqual(prompt?.[0], { type: "text", text: "/compact" });
+      assert.deepStrictEqual(prompt, [{ type: "text", text: "/compact" }]);
 
       yield* adapter.stopSession(threadId);
     }),
@@ -1954,7 +2131,9 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
       yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
 
       const wrapperPath = yield* Effect.promise(() =>
-        makeProbeWrapper(requestLogPath, argvLogPath, { T3_ACP_PROMPT_DELAY_MS: "1500" }),
+        makeProbeWrapper(requestLogPath, argvLogPath, {
+          T3_ACP_FIRST_PROMPT_GATE: "second-prompt",
+        }),
       );
       yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
 
@@ -1965,20 +2144,19 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
         runtimeMode: "full-access",
       });
 
+      const promptReady = yield* Deferred.make<void>();
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.threadId === threadId &&
+        event.type === "content.delta" &&
+        event.payload.delta === "prompt-waiting"
+          ? Deferred.succeed(promptReady, undefined)
+          : Effect.void,
+      ).pipe(Effect.forkChild);
+
       const firstTurnFiber = yield* adapter
         .sendTurn({ threadId, input: "run 5 commands", attachments: [] })
         .pipe(Effect.forkChild);
-      yield* Effect.gen(function* () {
-        for (let attempt = 0; attempt < 200; attempt += 1) {
-          const sessions = yield* adapter.listSessions();
-          const session = sessions.find((entry) => entry.threadId === threadId);
-          if (session?.activeTurnId !== undefined) {
-            return;
-          }
-          yield* TestClock.adjust("10 millis");
-        }
-        throw new Error("Timed out waiting for the first prompt to be in flight.");
-      });
+      yield* Deferred.await(promptReady);
 
       // The adapter does not special-case `/compact`: mid-turn prompts steer
       // like any other, and ProviderCommandReactor owns the "no compaction
@@ -2178,7 +2356,7 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
       const threadId = ThreadId.make("devin-stop-mid-turn-order");
 
       const wrapperPath = yield* Effect.promise(() =>
-        makeMockAgentWrapper({ T3_ACP_PROMPT_DELAY_MS: "1500" }),
+        makeMockAgentWrapper({ T3_ACP_FIRST_PROMPT_GATE: "second-prompt" }),
       );
       yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
 
@@ -2414,6 +2592,55 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
           yield* adapter.stopSession(threadId);
         }),
       ),
+  );
+
+  it.effect("uses standard HTTP MCP for new and resumed Devin sessions", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const adapter = yield* DevinAdapter;
+        const settings = yield* ServerSettingsService;
+        const threadId = ThreadId.make("devin-standard-mcp");
+        const logDir = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-standard-mcp-")),
+        );
+        const requestLogPath = NodePath.join(logDir, "requests.jsonl");
+        yield* registerT3Tools(threadId);
+        const wrapperPath = yield* Effect.promise(() =>
+          makeProbeWrapper(requestLogPath, NodePath.join(logDir, "argv.jsonl"), {
+            T3_ACP_MCP_HTTP: "1",
+          }),
+        );
+        yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+        const input = {
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access" as const,
+        };
+        const session = yield* adapter.startSession(input);
+        yield* adapter.stopSession(threadId);
+        yield* adapter.startSession({ ...input, resumeCursor: session.resumeCursor });
+        const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+        for (const method of ["session/new", "session/load"]) {
+          const params = requests.find((entry) => entry.method === method)?.params as Record<
+            string,
+            unknown
+          >;
+          assert.deepStrictEqual(params.mcpServers, [
+            {
+              type: "http",
+              name: "t3-code",
+              url: "http://127.0.0.1:1234/mcp",
+              headers: [{ name: "Authorization", value: "Bearer test-only" }],
+            },
+          ]);
+        }
+        assert.isFalse(
+          requests.some((entry) => entry.method === "_cognition.ai/mcp/connectServer"),
+        );
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
   );
 
   it.effect("skips the MCP connect when the Devin CLI does not advertise the extension", () =>

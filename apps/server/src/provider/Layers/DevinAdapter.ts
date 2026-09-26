@@ -30,6 +30,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -58,7 +59,7 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
-import { acpPermissionOutcome, mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
+import { mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
 import {
   makeAcpAssistantItemEvent,
   makeAcpContentDeltaEvent,
@@ -80,6 +81,7 @@ import {
   prepareDevinMcp,
 } from "../acp/DevinAcpSupport.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import { devinQuestions, devinAnswers } from "../acp/DevinUserInput.ts";
 import { prepareDevinSkillPrompt } from "../Drivers/DevinSkills.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import type { ProviderAdapterError } from "../Errors.ts";
@@ -93,7 +95,7 @@ const DEVIN_RESUME_VERSION = 1 as const;
 // ("Plan"), `bypass` ("Bypass Permissions"). The negotiated `mode` config
 // option applies them to the active session.
 const DEVIN_PLAN_MODE_ALIASES = ["plan", "architect"];
-const DEVIN_SUPERVISED_MODE_ALIASES = ["ask", "supervised"];
+const DEVIN_SUPERVISED_MODE_ALIASES = ["normal", "supervised"];
 const DEVIN_IMPLEMENT_MODE_ALIASES = ["accept-edits", "code", "agent", "default"];
 const DEVIN_AUTO_MODE_ALIASES = ["smart", "auto"];
 const DEVIN_FULL_ACCESS_MODE_ALIASES = ["bypass", "full access", "dangerous"];
@@ -104,6 +106,10 @@ function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
 }
 
 export interface DevinAdapterOptions {
+  readonly onAvailableCommands?: (
+    commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>,
+    cwd: string,
+  ) => Effect.Effect<void>;
   readonly environment?: NodeJS.ProcessEnv;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
@@ -142,10 +148,11 @@ interface DevinSessionContext {
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
   lastPlanFingerprint: string | undefined;
   activeTurnId: TurnId | undefined;
-  /** Number of sendTurn prompts currently in flight or being prepared.
-   * >0 means a turn is actively running, so a new sendTurn is a steer that
-   * continues it, and only the last remaining prompt settles the turn. */
+  /** Only prepared prompts bound to the active turn participate in settlement. */
   promptsInFlight: number;
+  terminalPromptResult:
+    | Extract<ProviderRuntimeEvent, { type: "turn.completed" }>["payload"]
+    | undefined;
   readonly supportsImages: boolean;
   /** Last model selection bound to this session; re-applied each turn so a
    * family slug keeps resolving against the live catalog. */
@@ -246,11 +253,8 @@ function resolveRequestedModeId(input: {
 
   switch (input.runtimeMode) {
     case "approval-required":
-      // Supervised promises T3 asks before commands and file changes.
-      // `accept-edits` would silently approve edits, and no more permissive
-      // fallback is honest — only Devin's read-only `ask` mode qualifies.
-      // An undefined result fails the turn instead of degrading into a
-      // mode that approves work the user never saw.
+      // Ask is a read-only agent profile, not supervised coding. Older ACP
+      // versions expose no supervised mode; reject it instead of changing semantics.
       return findModeByAliases(modeState.availableModes, DEVIN_SUPERVISED_MODE_ALIASES)?.id;
     case "auto-accept-edits":
       return (
@@ -488,11 +492,11 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
       return Effect.succeed(ctx);
     };
 
-    // Single-owner turn settlement: emits `turn.completed` at most once for
+    // Prompt settlement: emits `turn.completed` at most once for
     // a bound turn, and always while holding the thread lock so a session
     // stop cannot interleave `session.exited` between the ownership claim
     // and the event.
-    const finishTurn = (
+    const finishPrompt = (
       ctx: DevinSessionContext,
       turnId: TurnId,
       payload: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>["payload"],
@@ -501,6 +505,11 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
         ctx.threadId,
         Effect.gen(function* () {
           if (ctx.activeTurnId !== turnId) return;
+          ctx.promptsInFlight -= 1;
+          if (payload.state !== "completed" && ctx.terminalPromptResult?.state !== "failed") {
+            ctx.terminalPromptResult = payload;
+          }
+          if (ctx.promptsInFlight > 0) return;
           ctx.activeTurnId = undefined;
           ctx.session = {
             ...ctx.session,
@@ -513,14 +522,14 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             provider: PROVIDER,
             threadId: ctx.threadId,
             turnId,
-            payload,
+            payload: ctx.terminalPromptResult ?? payload,
           });
         }),
       );
 
     // Callers must hold `withThreadLock(ctx.threadId)`: the turn claim and
     // the terminal events below are the stop side of the settlement race
-    // described on finishTurn.
+    // described on finishPrompt.
     const stopSessionInternal = (ctx: DevinSessionContext) =>
       Effect.gen(function* () {
         if (ctx.stopped) return;
@@ -655,6 +664,17 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
               serverConfig.attachmentsDir,
               ...(mcpConfig !== undefined ? [mcpConfig.directory] : []),
             ],
+            resolveMcpServers: (initialized) =>
+              mcpSession && initialized.agentCapabilities?.mcpCapabilities?.http
+                ? [
+                    {
+                      type: "http",
+                      name: "t3-code",
+                      url: mcpSession.endpoint,
+                      headers: [{ name: "Authorization", value: mcpSession.authorizationHeader }],
+                    },
+                  ]
+                : [],
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "t3-code", version: "0.0.0" },
             ...acpNativeLoggers,
@@ -672,6 +692,41 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             ),
           );
           const started = yield* Effect.gen(function* () {
+            yield* acp.handleElicitation((params) =>
+              mapExtensionFailure(
+                Effect.gen(function* () {
+                  if (params.mode !== "form") return { action: { action: "decline" as const } };
+                  const questions = devinQuestions(params);
+                  if (questions.length === 0) return { action: { action: "cancel" as const } };
+                  const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
+                  const runtimeRequestId = RuntimeRequestId.make(requestId);
+                  const answers = yield* Deferred.make<ProviderUserInputAnswers>();
+                  pendingUserInputs.set(requestId, { answers });
+                  return yield* Effect.gen(function* () {
+                    yield* offerRuntimeEvent({
+                      type: "user-input.requested",
+                      ...(yield* makeEventStamp()),
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      turnId: ctx?.activeTurnId,
+                      requestId: runtimeRequestId,
+                      payload: { questions },
+                    });
+                    const resolved = yield* Deferred.await(answers);
+                    yield* offerRuntimeEvent({
+                      type: "user-input.resolved",
+                      ...(yield* makeEventStamp()),
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      turnId: ctx?.activeTurnId,
+                      requestId: runtimeRequestId,
+                      payload: { answers: resolved },
+                    });
+                    return devinAnswers(params, resolved);
+                  }).pipe(Effect.ensuring(Effect.sync(() => pendingUserInputs.delete(requestId))));
+                }),
+              ),
+            );
             yield* acp.handleRequestPermission((params) =>
               mapExtensionFailure(
                 Effect.gen(function* () {
@@ -731,13 +786,24 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                       decision: resolved,
                     }),
                   );
+                  const kind =
+                    resolved === "acceptForSession"
+                      ? "allow_always"
+                      : resolved === "accept"
+                        ? "allow_once"
+                        : "reject_once";
+                  const selected =
+                    params.options.find((option) => option.kind === kind) ??
+                    (resolved === "acceptForSession"
+                      ? params.options.find((option) => option.kind === "allow_once")
+                      : undefined);
                   return {
                     outcome:
-                      resolved === "cancel"
+                      resolved === "cancel" || !selected
                         ? ({ outcome: "cancelled" } as const)
                         : {
                             outcome: "selected" as const,
-                            optionId: acpPermissionOutcome(resolved),
+                            optionId: selected.optionId,
                           },
                   };
                 }),
@@ -750,7 +816,11 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             ),
           );
 
-          if (mcpConfig !== undefined) {
+          // Standard ACP installs tools in session/new and session/load.
+          if (
+            mcpConfig !== undefined &&
+            !started.initializeResult.agentCapabilities?.mcpCapabilities?.http
+          ) {
             if (devinSupportsMcpExtension(started.initializeResult)) {
               yield* mcpConfig
                 .connect(acp)
@@ -787,7 +857,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
               new ProviderAdapterRequestError({
                 provider: PROVIDER,
                 method: "session/set_mode",
-                detail: `Devin does not advertise a session mode that can honor '${runtimeMode}'.`,
+                detail: `Devin ACP does not expose '${runtimeMode}' coding. Select Auto, Auto-accept edits, or Full access. Ask mode is read-only.`,
               }),
           });
 
@@ -821,6 +891,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
             promptsInFlight: 0,
+            terminalPromptResult: undefined,
             supportsImages:
               started.initializeResult.agentCapabilities?.promptCapabilities?.image === true,
             modelSelection: devinModelSelection,
@@ -841,6 +912,24 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 if (ctx.stopped || ctx.disconnectReason !== undefined) return;
                 switch (event._tag) {
                   case "ModeChanged":
+                    return;
+                  case "AvailableCommandsUpdated":
+                    yield* (
+                      options?.onAvailableCommands?.(event.availableCommands, cwd) ?? Effect.void
+                    );
+                    return;
+                  case "ThoughtDelta":
+                    yield* offerRuntimeEvent(
+                      makeAcpContentDeltaEvent({
+                        stamp: yield* makeEventStamp(),
+                        provider: PROVIDER,
+                        threadId: ctx.threadId,
+                        turnId: ctx.activeTurnId,
+                        streamKind: "reasoning_text",
+                        text: event.text,
+                        rawPayload: event.rawPayload,
+                      }),
+                    );
                     return;
                   case "ConnectionTerminated":
                     // Set before the fork so `startSession`'s post-drain
@@ -990,42 +1079,101 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
     const sendTurn: ProviderAdapterShape<ProviderAdapterError>["sendTurn"] = (input) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(input.threadId);
-        // A sendTurn while a prompt is in flight is a steer: Devin folds
-        // the new prompt into the running turn and resolves every
-        // in-flight `session/prompt` when it ends, so the active turn id
-        // is reused instead of opening a new turn. Counted before any
-        // yield so two racing sendTurns can't both read zero.
-        ctx.promptsInFlight += 1;
-        const freshTurnId = TurnId.make(yield* randomUUIDv4);
-        let turnId = freshTurnId;
-        let turnStarted = false;
-
-        return yield* Effect.gen(function* () {
-          const turnModelSelection =
-            input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
-          const modelSelection = turnModelSelection ?? ctx.modelSelection;
-          const appliedModel = yield* applyRequestedSessionConfiguration({
-            runtime: ctx.acp,
-            runtimeMode: ctx.session.runtimeMode,
-            interactionMode: input.interactionMode,
-            modelSelection,
-            mapError: ({ cause, method }) =>
-              mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
-            missingModeError: (runtimeMode) =>
-              new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "session/set_mode",
-                detail: `Devin does not advertise a session mode that can honor '${runtimeMode}'.`,
-              }),
+        const turnModelSelection =
+          input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
+        const modelSelection = turnModelSelection ?? ctx.modelSelection;
+        const appliedModel = yield* applyRequestedSessionConfiguration({
+          runtime: ctx.acp,
+          runtimeMode: ctx.session.runtimeMode,
+          interactionMode: input.interactionMode,
+          modelSelection,
+          mapError: ({ cause, method }) =>
+            mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
+          missingModeError: (runtimeMode) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session/set_mode",
+              detail: `Devin ACP does not expose '${runtimeMode}' coding. Select Auto, Auto-accept edits, or Full access. Ask mode is read-only.`,
+            }),
+        });
+        const promptParts: Array<EffectAcpSchema.ContentBlock> = [];
+        const imageAttachments = (input.attachments ?? []).filter(
+          (attachment) => attachment.type === "image",
+        );
+        if (imageAttachments.length > 0 && !ctx.supportsImages) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session/prompt",
+            detail: "The installed Devin CLI does not support image attachments.",
           });
-          // Bind the turn and emit `turn.started` under the thread lock so a
-          // concurrent session stop either settles this turn after it is
-          // visible, or rejects the start outright — never `turn.started`
-          // after `session.exited` or a completed-without-started pair.
-          // `finishTurn` and `stopSessionInternal` clear `ctx.activeTurnId`
-          // under this same lock, so a set id means a live turn still
-          // accepting folds: steer into it and skip `turn.started`.
-          yield* withThreadLock(
+        }
+        for (const attachment of imageAttachments) {
+          const attachmentPath = resolveAttachmentPath({
+            attachmentsDir: serverConfig.attachmentsDir,
+            attachment,
+          });
+          if (!attachmentPath) {
+            return yield* new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session/prompt",
+              detail: `Invalid attachment id '${attachment.id}'.`,
+            });
+          }
+          const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session/prompt",
+                  detail: cause.message,
+                  cause,
+                }),
+            ),
+          );
+          promptParts.push({
+            type: "image",
+            data: Buffer.from(bytes).toString("base64"),
+            mimeType: attachment.mimeType,
+          });
+        }
+        const rawPrompt = input.input?.trim() ?? "";
+        if (rawPrompt) {
+          // The composer inserts `$name` for every provider; `devin acp`
+          // invokes a skill through a leading `/name` slash command, so a
+          // known mention is rewritten and everything else stays literal.
+          const text = yield* prepareDevinSkillPrompt(
+            rawPrompt,
+            ctx.devinSettings,
+            options?.environment,
+            ctx.session.cwd ?? process.cwd(),
+          ).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
+            Effect.provideService(Path.Path, path),
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session/prompt",
+                  detail: cause.message,
+                  cause,
+                }),
+            ),
+          );
+          promptParts.push({ type: "text", text });
+        }
+        // Generic files reach Devin through the path line ProviderService
+        // puts in the prompt text, matching Cursor and Grok.
+
+        if (promptParts.length === 0) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "sendTurn",
+            issue: "Turn requires non-empty text or attachments.",
+          });
+        }
+
+        return yield* Effect.acquireUseRelease(
+          withThreadLock(
             input.threadId,
             Effect.gen(function* () {
               if (ctx.stopped) {
@@ -1035,10 +1183,12 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 });
               }
               const steeringTurnId = ctx.activeTurnId;
-              turnId = steeringTurnId ?? turnId;
+              const turnId = steeringTurnId ?? TurnId.make(yield* randomUUIDv4);
+              ctx.promptsInFlight += 1;
               ctx.activeTurnId = turnId;
               if (steeringTurnId === undefined) {
                 ctx.lastPlanFingerprint = undefined;
+                ctx.terminalPromptResult = undefined;
               }
               // `applyModel` resolved the selection to the exact catalog id —
               // that is the model the session is actually running.
@@ -1060,161 +1210,55 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                   turnId,
                   payload: appliedModel !== undefined ? { model: appliedModel } : {},
                 });
-                turnStarted = true;
               }
+              return turnId;
             }),
-          );
-
-          const promptParts: Array<EffectAcpSchema.ContentBlock> = [];
-          const imageAttachments = (input.attachments ?? []).filter(
-            (attachment) => attachment.type === "image",
-          );
-          if (imageAttachments.length > 0 && !ctx.supportsImages) {
-            return yield* new ProviderAdapterRequestError({
-              provider: PROVIDER,
-              method: "session/prompt",
-              detail: "The installed Devin CLI does not support image attachments.",
-            });
-          }
-          for (const attachment of imageAttachments) {
-            const attachmentPath = resolveAttachmentPath({
-              attachmentsDir: serverConfig.attachmentsDir,
-              attachment,
-            });
-            if (!attachmentPath) {
-              return yield* new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "session/prompt",
-                detail: `Invalid attachment id '${attachment.id}'.`,
-              });
-            }
-            const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapterRequestError({
-                    provider: PROVIDER,
-                    method: "session/prompt",
-                    detail: cause.message,
-                    cause,
-                  }),
-              ),
-            );
-            promptParts.push({
-              type: "image",
-              data: Buffer.from(bytes).toString("base64"),
-              mimeType: attachment.mimeType,
-            });
-          }
-          const rawPrompt = input.input?.trim() ?? "";
-          if (rawPrompt) {
-            // The composer inserts `$name` for every provider; `devin acp`
-            // invokes a skill through a leading `/name` slash command, so a
-            // known mention is rewritten and everything else stays literal.
-            const text = yield* prepareDevinSkillPrompt(
-              rawPrompt,
-              ctx.devinSettings,
-              options?.environment,
-              ctx.session.cwd ?? process.cwd(),
-            ).pipe(
-              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
-              Effect.provideService(Path.Path, path),
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapterRequestError({
-                    provider: PROVIDER,
-                    method: "session/prompt",
-                    detail: cause.message,
-                    cause,
-                  }),
-              ),
-            );
-            promptParts.push({ type: "text", text });
-          }
-          // Generic files reach Devin through the path line ProviderService
-          // puts in the prompt text, matching Cursor and Grok.
-
-          if (promptParts.length === 0) {
-            return yield* new ProviderAdapterValidationError({
-              provider: PROVIDER,
-              operation: "sendTurn",
-              issue: "Turn requires non-empty text or attachments.",
-            });
-          }
-
-          // ACP has no system-message field; keep runtime context separate from the user's text.
-          const result = yield* ctx.acp
-            .prompt({
-              prompt: [
-                ...promptParts,
-                {
-                  type: "text",
-                  text: buildRuntimeInstructions({ harness: "Devin" }),
-                },
-              ],
-            })
-            .pipe(
-              Effect.mapError((error) =>
-                mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
-              ),
-            );
-
-          yield* ctx.acp.drainEvents;
-
-          const turnRecord = ctx.turns.find((turn) => turn.id === turnId);
-          if (turnRecord) {
-            turnRecord.items.push({ prompt: promptParts, result });
-          } else {
-            ctx.turns.push({ id: turnId, items: [{ prompt: promptParts, result }] });
-          }
-
-          if (ctx.promptsInFlight === 1) {
-            yield* finishTurn(ctx, turnId, {
-              state: result.stopReason === "cancelled" ? "cancelled" : "completed",
-              stopReason: result.stopReason ?? null,
-            });
-          }
-
-          return {
-            threadId: input.threadId,
-            turnId,
-            resumeCursor: ctx.session.resumeCursor,
-          };
-        }).pipe(
-          // The last in-flight prompt owns settlement: a bound turn with a
-          // later failure (including the transport dying mid-prompt) must be
-          // completed unless a session stop already claimed it, and a steer
-          // settling as the last prompt covers the owner having already
-          // returned. finishTurn no-ops when this fiber never bound a turn.
-          Effect.tapError((cause) =>
-            ctx.promptsInFlight === 1
-              ? finishTurn(ctx, turnId, { state: "failed", errorMessage: cause.message })
-              : Effect.void,
           ),
-          Effect.onInterrupt(() =>
+          (turnId) =>
             Effect.gen(function* () {
-              if (turnStarted) {
-                yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
-                yield* settlePendingUserInputsAsEmptyAnswers(ctx.pendingUserInputs);
-                yield* Effect.ignore(ctx.acp.cancel);
-              }
-              if (ctx.promptsInFlight === 1) {
-                yield* finishTurn(ctx, turnId, {
-                  state: "cancelled",
-                  stopReason: "cancelled",
-                });
-              }
+              // Native commands consume the complete text as their arguments.
+              const isCommand = promptParts.some(
+                (part) => part.type === "text" && /^\/[^\s/]+(?:\s|$)/.test(part.text),
+              );
+              const result = yield* ctx.acp
+                .prompt({
+                  prompt: isCommand
+                    ? promptParts
+                    : [
+                        ...promptParts,
+                        { type: "text", text: buildRuntimeInstructions({ harness: "Devin" }) },
+                      ],
+                })
+                .pipe(
+                  Effect.mapError((error) =>
+                    mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
+                  ),
+                );
+              yield* ctx.acp.drainEvents;
+              const turnRecord = ctx.turns.find((turn) => turn.id === turnId);
+              if (turnRecord) turnRecord.items.push({ prompt: promptParts, result });
+              else ctx.turns.push({ id: turnId, items: [{ prompt: promptParts, result }] });
+              return {
+                threadId: input.threadId,
+                turnId,
+                resumeCursor: ctx.session.resumeCursor,
+                result,
+              };
             }),
-          ),
-          Effect.ensuring(
-            Effect.sync(() => {
-              ctx.promptsInFlight = Math.max(0, ctx.promptsInFlight - 1);
-              if (ctx.promptsInFlight === 0 && ctx.activeTurnId === turnId) {
-                ctx.activeTurnId = undefined;
-                ctx.session = { ...ctx.session, activeTurnId: undefined };
-              }
-            }),
-          ),
-        );
+          (turnId, exit) =>
+            finishPrompt(
+              ctx,
+              turnId,
+              Exit.isSuccess(exit)
+                ? {
+                    state: exit.value.result.stopReason === "cancelled" ? "cancelled" : "completed",
+                    stopReason: exit.value.result.stopReason,
+                  }
+                : Cause.hasInterruptsOnly(exit.cause)
+                  ? { state: "cancelled", stopReason: "cancelled" }
+                  : { state: "failed", errorMessage: String(Cause.squash(exit.cause)) },
+            ),
+        ).pipe(Effect.map(({ result: _result, ...turn }) => turn));
       });
 
     const interruptTurn: ProviderAdapterShape<ProviderAdapterError>["interruptTurn"] = (threadId) =>

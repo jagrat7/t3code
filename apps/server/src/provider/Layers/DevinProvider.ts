@@ -35,9 +35,7 @@ import { DevinModelCatalog, devinModels } from "../acp/DevinModels.ts";
 export const DEVIN_PRESENTATION = {
   displayName: "Devin",
   badgeLabel: "Early Access",
-  // Hidden for now: a later milestone can expose Plan mode through the
-  // existing ACP session-mode path once sessions exist.
-  showInteractionModeToggle: false,
+  showInteractionModeToggle: true,
 } as const;
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
 // `initialize` is a single local round trip, so this is generous even on slow machines.
