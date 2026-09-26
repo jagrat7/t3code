@@ -1084,6 +1084,121 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
     }),
   );
 
+  it.effect("starts a fresh turn when a replacement is sent during native cancellation", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("devin-cancel-replace");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({
+          T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL: "1",
+          T3_ACP_CANCEL_RELEASE_PERMISSION: "1",
+        }),
+      );
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+      const toolStarted = yield* Deferred.make<void>();
+      const cancelWaiting = yield* Deferred.make<ApprovalRequestId>();
+      const events: Array<ProviderRuntimeEvent> = [];
+      yield* Stream.runForEach(adapter.streamEvents, (event) => {
+        if (event.threadId !== threadId) return Effect.void;
+        events.push(event);
+        if (event.type === "item.updated" && event.itemId === "native-cancel-tool")
+          return Deferred.succeed(toolStarted, undefined);
+        if (event.type === "request.opened" && event.requestId)
+          return Deferred.succeed(cancelWaiting, ApprovalRequestId.make(event.requestId));
+        return Effect.void;
+      }).pipe(Effect.forkChild);
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "auto",
+      });
+      const first = yield* adapter
+        .sendTurn({ threadId, input: "first task" })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(toolStarted);
+      const stopping = yield* adapter.interruptTurn(threadId).pipe(Effect.forkChild);
+      const releaseRequest = yield* Deferred.await(cancelWaiting);
+      const replacement = yield* adapter
+        .sendTurn({ threadId, input: "replacement task" })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      assert.isUndefined(stopping.pollUnsafe());
+      assert.isUndefined(replacement.pollUnsafe());
+      yield* adapter.respondToRequest(threadId, releaseRequest, "accept");
+      yield* Fiber.join(stopping);
+      const firstTurn = yield* Fiber.join(first);
+      const replacementTurn = yield* Fiber.join(replacement);
+      assert.notEqual(firstTurn.turnId, replacementTurn.turnId);
+      const completed = events.filter((event) => event.type === "turn.completed");
+      assert.deepStrictEqual(
+        completed.map((event) => [event.turnId, event.payload.state]),
+        [
+          [firstTurn.turnId, "cancelled"],
+          [replacementTurn.turnId, "completed"],
+        ],
+      );
+      const replacementStart = events.findIndex(
+        (event) => event.type === "turn.started" && event.turnId === replacementTurn.turnId,
+      );
+      assert.isAbove(
+        replacementStart,
+        events.findIndex(
+          (event) => event.type === "turn.completed" && event.turnId === firstTurn.turnId,
+        ),
+      );
+      const finalOldOutput = events.find(
+        (event) => event.type === "content.delta" && event.payload.delta === "Request cancelled.",
+      );
+      assert.equal(finalOldOutput?.turnId, firstTurn.turnId);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("reports failed native cancellation and retires the session before reuse", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("devin-cancel-timeout");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL: "1" }),
+      );
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+      const toolStarted = yield* Deferred.make<void>();
+      const cancelReceived = yield* Deferred.make<void>();
+      const sessionExited = yield* Deferred.make<void>();
+      yield* Stream.runForEach(adapter.streamEvents, (event) => {
+        if (event.threadId !== threadId) return Effect.void;
+        if (event.type === "item.updated" && event.itemId === "native-cancel-tool")
+          return Deferred.succeed(toolStarted, undefined);
+        if (event.type === "content.delta" && event.payload.delta === "native-cancel-received")
+          return Deferred.succeed(cancelReceived, undefined);
+        if (event.type === "session.exited") return Deferred.succeed(sessionExited, undefined);
+        return Effect.void;
+      }).pipe(Effect.forkChild);
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter
+        .sendTurn({ threadId, input: "hang during cancellation" })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(toolStarted);
+      const stopping = yield* adapter.interruptTurn(threadId).pipe(Effect.forkChild);
+      yield* Deferred.await(cancelReceived);
+      yield* TestClock.adjust("15 seconds");
+      const error = yield* Fiber.join(stopping).pipe(Effect.flip);
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+      if (error._tag === "ProviderAdapterRequestError")
+        assert.equal(error.method, "session/cancel");
+      yield* Deferred.await(sessionExited);
+      yield* Fiber.await(turn);
+      assert.isFalse(yield* adapter.hasSession(threadId));
+    }),
+  );
+
   it.effect("cancels pending ACP approvals and marks the turn cancelled when interrupted", () =>
     Effect.gen(function* () {
       const adapter = yield* DevinAdapter;

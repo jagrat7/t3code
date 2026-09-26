@@ -5,6 +5,7 @@ import * as NodeFS from "node:fs";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
@@ -390,6 +391,7 @@ function modelState(): AcpSchema.SessionModelState {
 
 const program = Effect.gen(function* () {
   const agent = yield* EffectAcpAgent.AcpAgent;
+  const agentScope = yield* Scope.Scope;
   const firstPromptRelease = yield* Deferred.make<void>();
   const resumeRelease = yield* Deferred.make<void>();
   const nativeCancelRequested = yield* Deferred.make<void>();
@@ -654,6 +656,23 @@ const program = Effect.gen(function* () {
             content: { type: "text", text: "native-cancel-received" },
           },
         });
+      }
+      if (completeFirstPromptOnCancel && process.env.T3_ACP_CANCEL_RELEASE_PERMISSION === "1") {
+        yield* agent.client
+          .requestPermission({
+            sessionId: cancelledSessionId,
+            toolCall: {
+              toolCallId: "release-cancel",
+              title: "Release cancellation",
+              kind: "other",
+              status: "pending",
+            },
+            options: [{ optionId: "release", name: "Release", kind: "allow_once" }],
+          })
+          .pipe(
+            Effect.andThen(Deferred.succeed(nativeCancelRelease, undefined)),
+            Effect.forkIn(agentScope),
+          );
       }
       if (emitLateUpdateAfterCancel) {
         yield* Effect.sleep("50 millis");

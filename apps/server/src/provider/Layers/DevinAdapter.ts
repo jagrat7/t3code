@@ -157,6 +157,8 @@ interface DevinSessionContext {
   activeTurnId: TurnId | undefined;
   /** Only prepared prompts bound to the active turn participate in settlement. */
   promptsInFlight: number;
+  readonly promptAdmission: Semaphore.Semaphore;
+  turnSettled: Deferred.Deferred<void> | undefined;
   terminalPromptResult:
     | Extract<ProviderRuntimeEvent, { type: "turn.completed" }>["payload"]
     | undefined;
@@ -535,6 +537,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             turnId,
             payload: ctx.terminalPromptResult ?? payload,
           });
+          if (ctx.turnSettled) yield* Deferred.succeed(ctx.turnSettled, undefined);
         }),
       );
 
@@ -574,6 +577,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 : { state: "cancelled", stopReason: "cancelled" },
           });
         }
+        if (ctx.turnSettled) yield* Deferred.succeed(ctx.turnSettled, undefined);
         yield* offerRuntimeEvent({
           type: "session.exited",
           ...(yield* makeEventStamp()),
@@ -905,6 +909,8 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
             promptsInFlight: 0,
+            promptAdmission: yield* Semaphore.make(1),
+            turnSettled: undefined,
             terminalPromptResult: undefined,
             supportsImages:
               started.initializeResult.agentCapabilities?.promptCapabilities?.image === true,
@@ -1093,199 +1099,229 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
     const sendTurn: ProviderAdapterShape<ProviderAdapterError>["sendTurn"] = (input) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(input.threadId);
-        const turnModelSelection =
-          input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
-        const modelSelection = turnModelSelection ?? ctx.modelSelection;
-        const appliedModel = yield* applyRequestedSessionConfiguration({
-          runtime: ctx.acp,
-          runtimeMode: ctx.session.runtimeMode,
-          interactionMode: input.interactionMode,
-          modelSelection,
-          mapError: ({ cause, method }) =>
-            mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
-          missingModeError: (runtimeMode) =>
-            new ProviderAdapterRequestError({
-              provider: PROVIDER,
-              method: "session/set_mode",
-              detail: `Devin ACP does not expose '${runtimeMode}' coding. Select Auto, Auto-accept edits, or Full access. Ask mode is read-only.`,
-            }),
-        });
-        const promptParts: Array<EffectAcpSchema.ContentBlock> = [];
-        const imageAttachments = (input.attachments ?? []).filter(
-          (attachment) => attachment.type === "image",
-        );
-        if (imageAttachments.length > 0 && !ctx.supportsImages) {
-          return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "session/prompt",
-            detail: "The installed Devin CLI does not support image attachments.",
-          });
-        }
-        for (const attachment of imageAttachments) {
-          const attachmentPath = resolveAttachmentPath({
-            attachmentsDir: serverConfig.attachmentsDir,
-            attachment,
-          });
-          if (!attachmentPath) {
-            return yield* new ProviderAdapterRequestError({
-              provider: PROVIDER,
-              method: "session/prompt",
-              detail: `Invalid attachment id '${attachment.id}'.`,
+        const dispatched = yield* Deferred.make<void>();
+        const sending = yield* ctx.promptAdmission.withPermit(
+          Effect.gen(function* () {
+            const turnModelSelection =
+              input.modelSelection?.instanceId === boundInstanceId
+                ? input.modelSelection
+                : undefined;
+            const modelSelection = turnModelSelection ?? ctx.modelSelection;
+            const appliedModel = yield* applyRequestedSessionConfiguration({
+              runtime: ctx.acp,
+              runtimeMode: ctx.session.runtimeMode,
+              interactionMode: input.interactionMode,
+              modelSelection,
+              mapError: ({ cause, method }) =>
+                mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
+              missingModeError: (runtimeMode) =>
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session/set_mode",
+                  detail: `Devin ACP does not expose '${runtimeMode}' coding. Select Auto, Auto-accept edits, or Full access. Ask mode is read-only.`,
+                }),
             });
-          }
-          const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProviderAdapterRequestError({
+            const promptParts: Array<EffectAcpSchema.ContentBlock> = [];
+            const imageAttachments = (input.attachments ?? []).filter(
+              (attachment) => attachment.type === "image",
+            );
+            if (imageAttachments.length > 0 && !ctx.supportsImages) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/prompt",
+                detail: "The installed Devin CLI does not support image attachments.",
+              });
+            }
+            for (const attachment of imageAttachments) {
+              const attachmentPath = resolveAttachmentPath({
+                attachmentsDir: serverConfig.attachmentsDir,
+                attachment,
+              });
+              if (!attachmentPath) {
+                return yield* new ProviderAdapterRequestError({
                   provider: PROVIDER,
                   method: "session/prompt",
-                  detail: cause.message,
-                  cause,
-                }),
-            ),
-          );
-          promptParts.push({
-            type: "image",
-            data: Buffer.from(bytes).toString("base64"),
-            mimeType: attachment.mimeType,
-          });
-        }
-        const rawPrompt = input.input?.trim() ?? "";
-        if (rawPrompt) {
-          // The composer inserts `$name` for every provider; `devin acp`
-          // invokes a skill through a leading `/name` slash command, so a
-          // known mention is rewritten and everything else stays literal.
-          const text = yield* prepareDevinSkillPrompt(
-            rawPrompt,
-            ctx.devinSettings,
-            options?.environment,
-            ctx.session.cwd ?? process.cwd(),
-          ).pipe(
-            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
-            Effect.provideService(Path.Path, path),
-            Effect.mapError(
-              (cause) =>
-                new ProviderAdapterRequestError({
-                  provider: PROVIDER,
-                  method: "session/prompt",
-                  detail: cause.message,
-                  cause,
-                }),
-            ),
-          );
-          promptParts.push({ type: "text", text });
-        }
-        // Generic files reach Devin through the path line ProviderService
-        // puts in the prompt text, matching Cursor and Grok.
-
-        if (promptParts.length === 0) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
-            operation: "sendTurn",
-            issue: "Turn requires non-empty text or attachments.",
-          });
-        }
-
-        return yield* Effect.acquireUseRelease(
-          withThreadLock(
-            input.threadId,
-            Effect.gen(function* () {
-              if (ctx.stopped) {
-                return yield* new ProviderAdapterSessionClosedError({
-                  provider: PROVIDER,
-                  threadId: input.threadId,
+                  detail: `Invalid attachment id '${attachment.id}'.`,
                 });
               }
-              const steeringTurnId = ctx.activeTurnId;
-              const turnId = steeringTurnId ?? TurnId.make(yield* randomUUIDv4);
-              ctx.promptsInFlight += 1;
-              ctx.activeTurnId = turnId;
-              if (steeringTurnId === undefined) {
-                ctx.lastPlanFingerprint = undefined;
-                ctx.terminalPromptResult = undefined;
-              }
-              // `applyModel` resolved the selection to the exact catalog id —
-              // that is the model the session is actually running.
-              ctx.session = {
-                ...ctx.session,
-                ...(appliedModel !== undefined ? { model: appliedModel } : {}),
-                activeTurnId: turnId,
-                updatedAt: yield* nowIso,
-              };
-              if (turnModelSelection) {
-                ctx.modelSelection = turnModelSelection;
-              }
-              if (steeringTurnId === undefined) {
-                yield* offerRuntimeEvent({
-                  type: "turn.started",
-                  ...(yield* makeEventStamp()),
-                  provider: PROVIDER,
-                  threadId: input.threadId,
-                  turnId,
-                  payload: appliedModel !== undefined ? { model: appliedModel } : {},
-                });
-              }
-              return turnId;
-            }),
-          ),
-          (turnId) =>
-            Effect.gen(function* () {
-              // Native commands consume the complete text as their arguments.
-              const isCommand = promptParts.some(
-                (part) => part.type === "text" && /^\/[^\s/]+(?:\s|$)/.test(part.text),
+              const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapterRequestError({
+                      provider: PROVIDER,
+                      method: "session/prompt",
+                      detail: cause.message,
+                      cause,
+                    }),
+                ),
               );
-              const result = yield* ctx.acp
-                .prompt({
-                  prompt: isCommand
-                    ? promptParts
-                    : [
-                        ...promptParts,
-                        { type: "text", text: buildRuntimeInstructions({ harness: "Devin" }) },
-                      ],
-                })
-                .pipe(
-                  Effect.mapError((error) =>
-                    mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
-                  ),
-                );
-              yield* ctx.acp.drainEvents;
-              const turnRecord = ctx.turns.find((turn) => turn.id === turnId);
-              if (turnRecord) turnRecord.items.push({ prompt: promptParts, result });
-              else ctx.turns.push({ id: turnId, items: [{ prompt: promptParts, result }] });
-              return {
-                threadId: input.threadId,
-                turnId,
-                resumeCursor: ctx.session.resumeCursor,
-                result,
-              };
-            }),
-          (turnId, exit) =>
-            finishPrompt(
-              ctx,
-              turnId,
-              Exit.isSuccess(exit)
-                ? {
-                    state: exit.value.result.stopReason === "cancelled" ? "cancelled" : "completed",
-                    stopReason: exit.value.result.stopReason,
+              promptParts.push({
+                type: "image",
+                data: Buffer.from(bytes).toString("base64"),
+                mimeType: attachment.mimeType,
+              });
+            }
+            const rawPrompt = input.input?.trim() ?? "";
+            if (rawPrompt) {
+              // The composer inserts `$name` for every provider; `devin acp`
+              // invokes a skill through a leading `/name` slash command, so a
+              // known mention is rewritten and everything else stays literal.
+              const text = yield* prepareDevinSkillPrompt(
+                rawPrompt,
+                ctx.devinSettings,
+                options?.environment,
+                ctx.session.cwd ?? process.cwd(),
+              ).pipe(
+                Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
+                Effect.provideService(Path.Path, path),
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapterRequestError({
+                      provider: PROVIDER,
+                      method: "session/prompt",
+                      detail: cause.message,
+                      cause,
+                    }),
+                ),
+              );
+              promptParts.push({ type: "text", text });
+            }
+            // Generic files reach Devin through the path line ProviderService
+            // puts in the prompt text, matching Cursor and Grok.
+
+            if (promptParts.length === 0) {
+              return yield* new ProviderAdapterValidationError({
+                provider: PROVIDER,
+                operation: "sendTurn",
+                issue: "Turn requires non-empty text or attachments.",
+              });
+            }
+
+            const fiber = yield* Effect.acquireUseRelease(
+              withThreadLock(
+                input.threadId,
+                Effect.gen(function* () {
+                  if (ctx.stopped) {
+                    return yield* new ProviderAdapterSessionClosedError({
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                    });
                   }
-                : Cause.hasInterruptsOnly(exit.cause)
-                  ? { state: "cancelled", stopReason: "cancelled" }
-                  : { state: "failed", errorMessage: String(Cause.squash(exit.cause)) },
-            ),
-        ).pipe(Effect.map(({ result: _result, ...turn }) => turn));
+                  const steeringTurnId = ctx.activeTurnId;
+                  const turnId = steeringTurnId ?? TurnId.make(yield* randomUUIDv4);
+                  ctx.promptsInFlight += 1;
+                  ctx.activeTurnId = turnId;
+                  if (steeringTurnId === undefined) {
+                    ctx.lastPlanFingerprint = undefined;
+                    ctx.terminalPromptResult = undefined;
+                    ctx.turnSettled = yield* Deferred.make<void>();
+                  }
+                  // `applyModel` resolved the selection to the exact catalog id —
+                  // that is the model the session is actually running.
+                  ctx.session = {
+                    ...ctx.session,
+                    ...(appliedModel !== undefined ? { model: appliedModel } : {}),
+                    activeTurnId: turnId,
+                    updatedAt: yield* nowIso,
+                  };
+                  if (turnModelSelection) {
+                    ctx.modelSelection = turnModelSelection;
+                  }
+                  if (steeringTurnId === undefined) {
+                    yield* offerRuntimeEvent({
+                      type: "turn.started",
+                      ...(yield* makeEventStamp()),
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      turnId,
+                      payload: appliedModel !== undefined ? { model: appliedModel } : {},
+                    });
+                  }
+                  return turnId;
+                }),
+              ),
+              (turnId) =>
+                Effect.gen(function* () {
+                  // Native commands consume the complete text as their arguments.
+                  const isCommand = promptParts.some(
+                    (part) => part.type === "text" && /^\/[^\s/]+(?:\s|$)/.test(part.text),
+                  );
+                  const result = yield* ctx.acp
+                    .prompt(
+                      {
+                        prompt: isCommand
+                          ? promptParts
+                          : [
+                              ...promptParts,
+                              {
+                                type: "text",
+                                text: buildRuntimeInstructions({ harness: "Devin" }),
+                              },
+                            ],
+                      },
+                      { dispatched },
+                    )
+                    .pipe(
+                      Effect.mapError((error) =>
+                        mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
+                      ),
+                    );
+                  yield* ctx.acp.drainEvents;
+                  const turnRecord = ctx.turns.find((turn) => turn.id === turnId);
+                  if (turnRecord) turnRecord.items.push({ prompt: promptParts, result });
+                  else ctx.turns.push({ id: turnId, items: [{ prompt: promptParts, result }] });
+                  return {
+                    threadId: input.threadId,
+                    turnId,
+                    resumeCursor: ctx.session.resumeCursor,
+                    result,
+                  };
+                }),
+              (turnId, exit) =>
+                finishPrompt(
+                  ctx,
+                  turnId,
+                  Exit.isSuccess(exit)
+                    ? {
+                        state:
+                          exit.value.result.stopReason === "cancelled" ? "cancelled" : "completed",
+                        stopReason: exit.value.result.stopReason,
+                      }
+                    : Cause.hasInterruptsOnly(exit.cause)
+                      ? { state: "cancelled", stopReason: "cancelled" }
+                      : { state: "failed", errorMessage: String(Cause.squash(exit.cause)) },
+                ),
+            ).pipe(
+              Effect.map(({ result: _result, ...turn }) => turn),
+              Effect.forkChild,
+            );
+            // Only admission is serialized: steering prompts may run concurrently.
+            // Stop cannot overtake a prompt that has bound a turn but has not reached ACP.
+            yield* Effect.raceFirst(Deferred.await(dispatched), Fiber.await(fiber));
+            return fiber;
+          }),
+        );
+        return yield* Fiber.join(sending);
       });
 
     const interruptTurn: ProviderAdapterShape<ProviderAdapterError>["interruptTurn"] = (threadId) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
-        yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
-        yield* cancelPendingUserInputs(ctx.pendingUserInputs);
-        yield* Effect.ignore(
-          ctx.acp.cancel.pipe(
-            Effect.mapError((error) =>
-              mapAcpToAdapterError(PROVIDER, threadId, "session/cancel", error),
-            ),
-          ),
+        yield* ctx.promptAdmission.withPermit(
+          Effect.gen(function* () {
+            if (ctx.stopped || ctx.activeTurnId === undefined) return;
+            const settled = ctx.turnSettled;
+            yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
+            yield* cancelPendingUserInputs(ctx.pendingUserInputs);
+            yield* ctx.acp.cancel.pipe(
+              Effect.mapError((error) =>
+                mapAcpToAdapterError(PROVIDER, threadId, "session/cancel", error),
+              ),
+            );
+            // Native completion alone is insufficient: final updates and the adapter's
+            // turn.completed must land before a replacement can bind its own turn.
+            if (settled) yield* Deferred.await(settled);
+          }),
         );
       });
 
