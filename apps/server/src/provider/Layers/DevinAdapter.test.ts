@@ -780,6 +780,15 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
             request.payload.questions[0]?.options.map((option) => option.value),
             ["staging", "production"],
           );
+          const invalid = yield* adapter
+            .respondToUserInput(threadId, ApprovalRequestId.make(request.requestId!), {
+              target: "not-offered",
+            })
+            .pipe(Effect.flip);
+          assert.equal(invalid._tag, "ProviderAdapterValidationError");
+          assert.include(invalid.message, "target");
+          assert.isFalse(events.some((event) => event.type === "user-input.resolved"));
+          assert.isFalse(events.some((event) => event.type === "turn.completed"));
           if (cancel) yield* adapter.interruptTurn(threadId);
           else
             yield* adapter.respondToUserInput(

@@ -40,6 +40,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
@@ -81,7 +82,7 @@ import {
   prepareDevinMcp,
 } from "../acp/DevinAcpSupport.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
-import { devinQuestions, devinAnswers } from "../acp/DevinUserInput.ts";
+import { devinQuestions, makeDevinAnswerParser } from "../acp/DevinUserInput.ts";
 import { prepareDevinSkillPrompt } from "../Drivers/DevinSkills.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import type { ProviderAdapterError } from "../Errors.ts";
@@ -132,8 +133,14 @@ interface PendingApproval {
   readonly kind: string | "unknown";
 }
 
+interface DevinUserInputResponse {
+  readonly answers: ProviderUserInputAnswers;
+  readonly response: EffectAcpSchema.ElicitationResponse;
+}
+
 interface PendingUserInput {
-  readonly answers: Deferred.Deferred<ProviderUserInputAnswers>;
+  readonly parseAnswers: ReturnType<typeof makeDevinAnswerParser>;
+  readonly answers: Deferred.Deferred<DevinUserInputResponse>;
 }
 
 interface DevinSessionContext {
@@ -176,13 +183,17 @@ function settlePendingApprovalsAsCancelled(
   );
 }
 
-function settlePendingUserInputsAsEmptyAnswers(
+function cancelPendingUserInputs(
   pendingUserInputs: ReadonlyMap<ApprovalRequestId, PendingUserInput>,
 ): Effect.Effect<void> {
   const pendingEntries = Array.from(pendingUserInputs.values());
   return Effect.forEach(
     pendingEntries,
-    (pending) => Deferred.succeed(pending.answers, {}).pipe(Effect.ignore),
+    (pending) =>
+      Deferred.succeed(pending.answers, {
+        answers: {},
+        response: { action: { action: "cancel" } },
+      }).pipe(Effect.ignore),
     {
       discard: true,
     },
@@ -537,7 +548,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
         const unsettledTurnId = ctx.activeTurnId;
         ctx.activeTurnId = undefined;
         yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
-        yield* settlePendingUserInputsAsEmptyAnswers(ctx.pendingUserInputs);
+        yield* cancelPendingUserInputs(ctx.pendingUserInputs);
         if (ctx.notificationFiber) {
           yield* Fiber.interrupt(ctx.notificationFiber);
         }
@@ -700,8 +711,11 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                   if (questions.length === 0) return { action: { action: "cancel" as const } };
                   const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
                   const runtimeRequestId = RuntimeRequestId.make(requestId);
-                  const answers = yield* Deferred.make<ProviderUserInputAnswers>();
-                  pendingUserInputs.set(requestId, { answers });
+                  const answers = yield* Deferred.make<DevinUserInputResponse>();
+                  pendingUserInputs.set(requestId, {
+                    answers,
+                    parseAnswers: makeDevinAnswerParser(params),
+                  });
                   return yield* Effect.gen(function* () {
                     yield* offerRuntimeEvent({
                       type: "user-input.requested",
@@ -720,9 +734,9 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                       threadId: input.threadId,
                       turnId: ctx?.activeTurnId,
                       requestId: runtimeRequestId,
-                      payload: { answers: resolved },
+                      payload: { answers: resolved.answers },
                     });
-                    return devinAnswers(params, resolved);
+                    return resolved.response;
                   }).pipe(Effect.ensuring(Effect.sync(() => pendingUserInputs.delete(requestId))));
                 }),
               ),
@@ -1265,7 +1279,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
         yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
-        yield* settlePendingUserInputsAsEmptyAnswers(ctx.pendingUserInputs);
+        yield* cancelPendingUserInputs(ctx.pendingUserInputs);
         yield* Effect.ignore(
           ctx.acp.cancel.pipe(
             Effect.mapError((error) =>
@@ -1304,11 +1318,19 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
         if (!pending) {
           return yield* new ProviderAdapterRequestError({
             provider: PROVIDER,
-            method: "session/request_permission",
+            method: "session/elicitation",
             detail: `Unknown pending user-input request: ${requestId}`,
           });
         }
-        yield* Deferred.succeed(pending.answers, answers);
+        const response = pending.parseAnswers(answers);
+        if (Result.isFailure(response)) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "respondToUserInput",
+            issue: response.failure,
+          });
+        }
+        yield* Deferred.succeed(pending.answers, { answers, response: response.success });
       });
 
     const readThread: ProviderAdapterShape<ProviderAdapterError>["readThread"] = (threadId) =>
