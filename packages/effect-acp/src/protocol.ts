@@ -19,6 +19,7 @@ import * as AcpSchema from "./_generated/schema.gen.ts";
 import { CLIENT_METHODS } from "./_generated/meta.gen.ts";
 import * as AcpError from "./errors.ts";
 const isAcpError = Schema.is(AcpError.AcpError);
+const isProtocolError = Schema.is(AcpSchema.Error);
 
 export interface AcpProtocolLogEvent {
   readonly direction: "incoming" | "outgoing";
@@ -376,8 +377,24 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     return Queue.offer(serverQueue, message).pipe(Effect.asVoid);
   };
 
-  const handleExitEncoded = (message: RpcMessage.ResponseExitEncoded) =>
-    Ref.get(extPending).pipe(
+  const handleExitEncoded = (received: RpcMessage.ResponseExitEncoded) => {
+    // Effect's JSON-RPC parser treats ordinary peer errors as defects. ACP errors
+    // are request failures; preserve their code/data before RpcClient decodes them.
+    const message: RpcMessage.ResponseExitEncoded =
+      received.exit._tag === "Failure"
+        ? {
+            ...received,
+            exit: {
+              ...received.exit,
+              cause: received.exit.cause.map((reason) =>
+                reason._tag === "Die" && isProtocolError(reason.defect)
+                  ? { _tag: "Fail", error: reason.defect }
+                  : reason,
+              ),
+            },
+          }
+        : received;
+    return Ref.get(extPending).pipe(
       Effect.flatMap((pending) => {
         const pendingRequest = pending.get(String(message.requestId));
         if (!pendingRequest) {
@@ -407,6 +424,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
         );
       }),
     );
+  };
 
   const routeDecodedMessage = (
     message: RpcMessage.FromClientEncoded | RpcMessage.FromServerEncoded,
@@ -617,16 +635,3 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     notify: sendNotification,
   } satisfies AcpPatchedProtocol;
 });
-
-function isProtocolError(
-  value: unknown,
-): value is { code: number; message: string; data?: unknown } {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "code" in value &&
-    typeof value.code === "number" &&
-    "message" in value &&
-    typeof value.message === "string"
-  );
-}

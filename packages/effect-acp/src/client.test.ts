@@ -85,6 +85,66 @@ function concatBytes(chunks: ReadonlyArray<Uint8Array>): Uint8Array {
 }
 
 it.layer(NodeServices.layer)("effect-acp client", (it) => {
+  for (const method of ["session/set_config_option", "x/test"]) {
+    it.effect(`preserves standard JSON-RPC errors for ${method} and accepts the next request`, () =>
+      Effect.gen(function* () {
+        const { stdio, input, output } = yield* makeInMemoryStdio();
+        const acp = yield* AcpClient.make(stdio);
+        const call = () =>
+          method === "x/test"
+            ? acp.raw.request(method, {})
+            : acp.agent.setSessionConfigOption({
+                sessionId: "session",
+                configId: "model",
+                value: "unavailable",
+              });
+        const decodeRequest = Schema.decodeEffect(
+          Schema.fromJsonString(jsonRpcRequest(method, Schema.Unknown)),
+        );
+        const pending = yield* call().pipe(Effect.forkScoped);
+        const request = yield* decodeRequest(yield* Queue.take(output));
+        const wireError = {
+          code: -32602,
+          message: "Invalid params",
+          data: "Invalid value for model",
+        };
+        yield* Queue.offer(
+          input,
+          yield* encodeJsonl(
+            Schema.Struct({
+              jsonrpc: Schema.Literal("2.0"),
+              id: Schema.Union([Schema.String, Schema.Number]),
+              error: AcpSchema.Error,
+            }),
+            {
+              jsonrpc: "2.0",
+              id: request.id,
+              error: wireError,
+            },
+          ),
+        );
+        const error = yield* Fiber.join(pending).pipe(Effect.asVoid, Effect.flip);
+        assert.equal(error._tag, "AcpRequestError");
+        if (error._tag === "AcpRequestError") {
+          assert.equal(error.method, method);
+          assert.equal(error.code, wireError.code);
+          assert.equal(error.message, wireError.message);
+          assert.equal(error.data, wireError.data);
+        }
+        const retry = yield* call().pipe(Effect.forkScoped);
+        const next = yield* decodeRequest(yield* Queue.take(output));
+        yield* Queue.offer(
+          input,
+          yield* encodeJsonl(jsonRpcResponse(Schema.Unknown), {
+            jsonrpc: "2.0",
+            id: next.id,
+            result: { configOptions: [] },
+          }),
+        );
+        assert.deepEqual(yield* Fiber.join(retry), { configOptions: [] });
+      }),
+    );
+  }
   const makeHandle = (env?: Record<string, string>) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
