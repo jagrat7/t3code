@@ -1,6 +1,5 @@
 import type {
   ModelCapabilities,
-  ServerProvider,
   ProviderOptionDescriptor,
   ProviderOptionSelection,
 } from "@t3tools/contracts";
@@ -10,17 +9,15 @@ import {
 } from "@t3tools/shared/model";
 
 export function resolveProviderOptionDescriptors(input: {
-  readonly modelPolicy?: ServerProvider["modelPolicy"];
   readonly capabilities: ModelCapabilities | null | undefined;
   readonly selections: ReadonlyArray<ProviderOptionSelection> | null | undefined;
 }): ReadonlyArray<ProviderOptionDescriptor> {
-  if (!input.capabilities && input.modelPolicy?.optionSelection !== "exact") {
+  if (!input.capabilities) {
     return [];
   }
   return getProviderOptionDescriptors({
-    caps: input.capabilities ?? {},
+    caps: input.capabilities,
     selections: input.selections,
-    preserveUnavailableSelections: input.modelPolicy?.optionSelection === "exact",
   });
 }
 

@@ -29,7 +29,7 @@ import { composerContextSendBlockReason, reidentifyComposerContext } from "../li
 import { uuidv4 } from "../lib/uuid";
 
 import { makeQueuedMessageMetadata } from "../lib/commandMetadata";
-import { getModelSelectionUnavailableReason } from "../lib/modelOptions";
+import { getModelSelectionUnavailableReason, normalizeSelectionOptions } from "../lib/modelOptions";
 import { resolveProviderInteractionMode } from "../features/threads/legacy-plan-mode";
 import {
   convertPastedImagesToAttachments,
@@ -385,6 +385,15 @@ export function useThreadComposerState() {
     const provider = serverConfig?.providers.find(
       (entry) => entry.instanceId === modelSelection.instanceId,
     );
+    const selectedModel = provider?.models.find(
+      (candidate) =>
+        candidate.slug === modelSelection.model ||
+        candidate.aliases?.includes(modelSelection.model),
+    );
+    const modelSelectionForDispatch = normalizeSelectionOptions(
+      modelSelection,
+      selectedModel?.capabilities ?? null,
+    );
     const feedbackCommand =
       attachments.length === 0 &&
       (provider?.driver === "codex" || thread.session?.providerName === "codex")
@@ -442,7 +451,7 @@ export function useThreadComposerState() {
       text,
       attachments,
       context: draft.context,
-      modelSelection,
+      modelSelection: modelSelectionForDispatch,
       runtimeMode: draft.runtimeMode ?? thread.runtimeMode,
       interactionMode: resolveProviderInteractionMode(
         provider,

@@ -12,6 +12,7 @@ import {
   groupByProvider,
   getModelSelectionUnavailableReason,
   isModelSelectionUnavailable,
+  normalizeSelectionOptions,
   resolveDefaultableModelSelection,
   resolveNewTaskModelSelection,
   resolveSelectableModelSelection,
@@ -19,6 +20,29 @@ import {
 } from "./modelOptions";
 
 describe("mobile model options", () => {
+  it("sends the catalog default when the saved reasoning level is unavailable", () => {
+    const selection: ModelSelection = {
+      instanceId: ProviderInstanceId.make("devin"),
+      model: "swe-1.7",
+      options: [{ id: "reasoningEffort", value: "xhigh" }],
+    };
+    expect(
+      normalizeSelectionOptions(selection, {
+        optionDescriptors: [
+          {
+            id: "reasoningEffort",
+            label: "Thinking level",
+            type: "select",
+            options: [
+              { id: "medium", label: "Medium", isDefault: true },
+              { id: "max", label: "Max" },
+            ],
+          },
+        ],
+      }),
+    ).toEqual({ ...selection, options: [{ id: "reasoningEffort", value: "medium" }] });
+  });
+
   it("groups models by provider and flags legacy entries", () => {
     const config = {
       providers: [
@@ -243,7 +267,7 @@ describe("mobile model options", () => {
       ],
     } as unknown as ServerConfig;
 
-    it("accepts advertised aliases without changing the saved model or options", () => {
+    it("accepts advertised aliases and resolves stale options against the catalog", () => {
       const aliasSelection = { ...selection, model: "catalog-alias" };
       const aliasConfig = {
         ...config,
@@ -262,7 +286,10 @@ describe("mobile model options", () => {
       expect(option?.isUnavailable).not.toBe(true);
       expect(option?.label).toBe(model.name);
       expect(option?.capabilities).toEqual(model.capabilities);
-      expect(option?.selection).toBe(aliasSelection);
+      expect(option?.selection).toEqual({
+        ...aliasSelection,
+        options: [{ id: "native-option", value: "current/default" }],
+      });
       expect(
         isModelSelectionUnavailable(aliasConfig, { ...selection, model: "unknown-alias" }),
       ).toBe(true);
@@ -297,7 +324,10 @@ describe("mobile model options", () => {
       expect(
         options.find((option) => option.key === `${selection.instanceId}:${selection.model}`)
           ?.selection,
-      ).toBe(selection);
+      ).toEqual({
+        ...selection,
+        options: [{ id: "native-option", value: "current/default" }],
+      });
       expect(
         options.find((option) => option.key === `${selection.instanceId}:other-model`)?.selection
           .model,
@@ -358,7 +388,7 @@ describe("mobile model options", () => {
       expect(option?.selection).toBe(selection);
     });
 
-    it("keeps an exact selection when its model leaves and returns to the catalog", () => {
+    it("keeps the saved model while absent and resolves its options when it returns", () => {
       const changedConfig = {
         ...config,
         providers: config.providers.map((provider) => ({
@@ -391,7 +421,10 @@ describe("mobile model options", () => {
       const [restored] = buildModelOptions(config, selection);
       expect(isModelSelectionUnavailable(config, selection)).toBe(false);
       expect(restored?.isUnavailable).not.toBe(true);
-      expect(restored?.selection).toBe(selection);
+      expect(restored?.selection).toEqual({
+        ...selection,
+        options: [{ id: "native-option", value: "current/default" }],
+      });
       expect(resolveDefaultableModelSelection(config, selection)).toBe(selection);
       expect(buildModelOptions(config, null)[0]?.selection.options).toBeUndefined();
     });
