@@ -106,8 +106,8 @@ function resolveComposerOptionSelections(
   const caps = getProviderModelCapabilities(models, model, provider, planModeEnabled);
   return {
     caps,
-    // `exact` policies dispatch the persisted selections verbatim — no
-    // implicit fastMode default may be synthesized onto a family pick.
+    // `exact` policies do not synthesize an implicit fastMode default.
+    // Saved choices are still resolved against the selected model's catalog.
     selections:
       resolveProviderModelPolicy({ driver: provider, modelPolicy }).optionSelection === "exact"
         ? (modelOptions ?? undefined)
@@ -151,8 +151,6 @@ export function getComposerProviderState(input: ComposerProviderStateInput): Com
   const descriptors = getProviderOptionDescriptors({
     caps,
     selections,
-    preserveUnavailableSelections:
-      resolveProviderModelPolicy({ driver: provider, modelPolicy }).optionSelection === "exact",
   });
   const primarySelectDescriptor = descriptors.find(
     (descriptor): descriptor is Extract<(typeof descriptors)[number], { type: "select" }> =>

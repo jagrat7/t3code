@@ -491,7 +491,7 @@ describe("provider traits render guards", () => {
   });
 });
 
-it("preserves exact catalog options for an unknown driver", () => {
+it("uses available catalog options for an unknown driver", () => {
   const modelOptions = selections(["reasoningEffort", "max"], ["fastMode", true]);
   const models = modelWith([
     selectDescriptor("reasoningEffort", [{ id: "high", label: "High", isDefault: true }]),
@@ -504,7 +504,7 @@ it("preserves exact catalog options for an unknown driver", () => {
     modelOptions,
     planModeEnabled: false,
   });
-  expect(state.modelOptionsForDispatch).toEqual(modelOptions);
+  expect(state.modelOptionsForDispatch).toEqual(selections(["reasoningEffort", "high"]));
   const defaultState = getComposerProviderState({
     provider: ProviderDriverKind.make("test-account-provider"),
     modelPolicy: { optionSelection: "exact" },
@@ -517,11 +517,10 @@ it("preserves exact catalog options for an unknown driver", () => {
   const descriptors = getProviderOptionDescriptors({
     caps: models[0]!.capabilities!,
     selections: modelOptions,
-    preserveUnavailableSelections: true,
   });
-  expect(descriptors[0]?.currentValue).toBe("max");
-  expect(descriptors[1]?.currentValue).toBe(true);
-  expect(descriptors[0]?.type === "select" && descriptors[0].options.at(-1)?.label).toContain(
-    "Unavailable",
-  );
+  expect(descriptors[0]?.currentValue).toBe("high");
+  expect(descriptors).toHaveLength(1);
+  expect(
+    descriptors[0]?.type === "select" && descriptors[0].options.map((option) => option.id),
+  ).toEqual(["high"]);
 });

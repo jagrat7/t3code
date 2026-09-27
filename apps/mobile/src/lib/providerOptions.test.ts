@@ -61,4 +61,16 @@ describe("mobile provider options", () => {
       { id: "fastMode", value: true },
     ]);
   });
+
+  it("shows only current catalog choices when a saved selection is stale", () => {
+    const descriptors = resolveProviderOptionDescriptors({
+      capabilities: CODEX_CAPABILITIES,
+      selections: [{ id: "reasoningEffort", value: "xhigh" }],
+    });
+
+    expect(
+      descriptors[0]?.type === "select" && descriptors[0].options.map((option) => option.id),
+    ).toEqual(["medium", "high"]);
+    expect(descriptors[0]?.currentValue).toBe("medium");
+  });
 });

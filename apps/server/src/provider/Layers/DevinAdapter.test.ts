@@ -1130,8 +1130,12 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
           const adapter = yield* DevinAdapter;
           const settings = yield* ServerSettingsService;
           const threadId = ThreadId.make("devin-cancel-replace");
+          const tempDir = yield* Effect.promise(() =>
+            NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-cancel-controls-")),
+          );
+          const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
           const wrapperPath = yield* Effect.promise(() =>
-            makeMockAgentWrapper({
+            makeProbeWrapper(requestLogPath, NodePath.join(tempDir, "argv.txt"), {
               T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL: "1",
               T3_ACP_CANCEL_RELEASE_PERMISSION: "1",
               T3_ACP_DEVIN_MODEL_CONTROLS: separateControls ? "1" : "0",
@@ -1200,7 +1204,18 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
           assert.notEqual(firstTurn.turnId, replacementTurn.turnId);
           assert.equal(
             (yield* adapter.listSessions()).find((s) => s.threadId === threadId)?.model,
-            "swe-2-medium",
+            separateControls ? "swe-2-high" : "swe-2-medium",
+          );
+          const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+          const replacementPrompt = requests.findLastIndex((r) => r.method === "session/prompt");
+          const lastConfig = requests
+            .slice(0, replacementPrompt)
+            .findLast((r) => r.method === "session/set_config_option");
+          assert.containsSubset(
+            lastConfig?.params,
+            separateControls
+              ? { configId: "thought_level", value: "medium" }
+              : { configId: "model", value: "swe-2-medium" },
           );
           const completed = events.filter((event) => event.type === "turn.completed");
           assert.deepStrictEqual(
@@ -1817,6 +1832,186 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
   });
   const FAMILY_MODEL_IDS =
     "opus-high,opus-medium,opus-high-fast,opus-medium-fast,native-swe,pair-high,pair-medium,pair-high-fast,pair-medium-fast";
+
+  for (const model of ["family", "family-alias", "opaque-native-id"]) {
+    it.effect(`uses native controls independently of catalog display labels (${model})`, () =>
+      Effect.gen(function* () {
+        const adapter = yield* DevinAdapter;
+        const settings = yield* ServerSettingsService;
+        const threadId = ThreadId.make("devin-native-label-independent");
+        const tempDir = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-native-labels-")),
+        );
+        const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+        const wrapperPath = yield* Effect.promise(() =>
+          makeProbeWrapper(requestLogPath, NodePath.join(tempDir, "argv.txt"), {
+            T3_ACP_DEVIN_MODEL_CONTROLS: "1",
+            T3_ACP_MODEL_IDS: "opaque-native-id",
+            // Direct native IDs must work even when the catalog is unavailable.
+            T3_DEVIN_MODELS_JSON:
+              model === "opaque-native-id"
+                ? "invalid catalog"
+                : encodeUnknownJsonString({
+                    families: [
+                      {
+                        slug: "family",
+                        aliases: ["family-alias"],
+                        family_label: "Renamed family",
+                        variants: [
+                          { model_uid: "opaque-native-id", label: "A localized display name" },
+                          { model_uid: "legacy-variant", label: "Another display name" },
+                        ],
+                      },
+                    ],
+                  }),
+          }),
+        );
+        yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+        const session = yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("devin"),
+            model,
+            options: [
+              { id: "reasoningEffort", value: "medium" },
+              { id: "fastMode", value: true },
+            ],
+          },
+        });
+        assert.equal(session.model, "opaque-native-id");
+        yield* adapter.sendTurn({ threadId, input: "continue" });
+        yield* adapter.sendTurn({
+          threadId,
+          input: "change thinking and speed",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("devin"),
+            model,
+            options: [
+              { id: "reasoningEffort", value: "max" },
+              { id: "fastMode", value: false },
+            ],
+          },
+        });
+        const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+        assert.deepStrictEqual(
+          requests
+            .filter((r) => r.method === "session/set_config_option")
+            .map((r) => {
+              const params = r.params as { configId: string; value: string };
+              return [params.configId, params.value];
+            }),
+          [
+            ["model", "opaque-native-id"],
+            ["thought_level", "medium"],
+            ["speed", "fast"],
+            ["thought_level", "max"],
+            ["speed", "standard"],
+          ],
+        );
+        yield* adapter.stopSession(threadId);
+      }),
+    );
+  }
+
+  it.effect(
+    "rejects unavailable native controls before prompting and accepts a corrected selection",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* DevinAdapter;
+        const settings = yield* ServerSettingsService;
+        const threadId = ThreadId.make("devin-invalid-native-control");
+        const tempDir = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-invalid-native-")),
+        );
+        const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+        const wrapperPath = yield* Effect.promise(() =>
+          makeProbeWrapper(requestLogPath, NodePath.join(tempDir, "argv.txt"), {
+            T3_ACP_DEVIN_MODEL_CONTROLS: "1",
+            T3_ACP_MODEL_IDS: "opus-high,swe-native",
+            T3_DEVIN_MODELS_JSON: FAMILY_MODELS_JSON,
+          }),
+        );
+        yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+        yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("devin"),
+            model: "opus",
+            options: [{ id: "reasoningEffort", value: "high" }],
+          },
+        });
+        for (const invalidOptions of [
+          [{ id: "reasoningEffort", value: "unavailable" }],
+          [{ id: "fastMode", value: "fast" }],
+          [
+            { id: "reasoningEffort", value: "medium" },
+            { id: "fastMode", value: true },
+          ],
+        ]) {
+          // SWE advertises thinking, but no speed control. The valid first option
+          // must not be applied when another option in the selection is invalid.
+          const model = invalidOptions.length === 2 ? "swe-native" : "opus-high";
+          const error = yield* adapter
+            .sendTurn({
+              threadId,
+              input: "must not reach the provider",
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("devin"),
+                model,
+                options: invalidOptions,
+              },
+            })
+            .pipe(Effect.flip);
+          assert.include(error.message, "Devin does not offer the selected");
+        }
+        const rejectedRequests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+        assert.isFalse(rejectedRequests.some((r) => r.method === "session/prompt"));
+        assert.deepStrictEqual(
+          rejectedRequests
+            .filter((r) => r.method === "session/set_config_option")
+            .map((r) => {
+              const params = r.params as { configId: string; value: string };
+              return [params.configId, params.value];
+            }),
+          [
+            ["model", "opus-high"],
+            ["thought_level", "high"],
+            ["model", "swe-native"],
+          ],
+        );
+        yield* adapter.sendTurn({
+          threadId,
+          input: "corrected selection",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("devin"),
+            model: "opus",
+            options: [{ id: "reasoningEffort", value: "medium" }],
+          },
+        });
+        const retriedRequests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+        assert.equal(retriedRequests.filter((r) => r.method === "session/prompt").length, 1);
+        assert.deepStrictEqual(
+          retriedRequests
+            .filter((r) => r.method === "session/set_config_option")
+            .slice(-2)
+            .map((r) => {
+              const params = r.params as { configId: string; value: string };
+              return [params.configId, params.value];
+            }),
+          [
+            ["model", "opus-high"],
+            ["thought_level", "medium"],
+          ],
+        );
+        yield* adapter.stopSession(threadId);
+      }),
+  );
 
   it.effect(
     "applies separate Devin thinking and speed controls for families, exact ids, and Fusion",

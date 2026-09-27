@@ -1,5 +1,4 @@
 import {
-  resolveProviderModelPolicy,
   type ProviderDriverKind,
   type ProviderInstanceId,
   type ProviderOptionDescriptor,
@@ -141,7 +140,6 @@ function getSelectedTraits(
   modelOptions: ProviderOptions | null | undefined,
   allowPromptInjectedEffort: boolean,
   planModeEnabled: boolean,
-  modelPolicy: ServerProvider["modelPolicy"],
 ) {
   const caps = getProviderModelCapabilities(models, model, provider, planModeEnabled);
   const modelIsUnavailable =
@@ -156,8 +154,6 @@ function getSelectedTraits(
     : getProviderOptionDescriptors({
         caps,
         selections: modelOptions,
-        preserveUnavailableSelections:
-          resolveProviderModelPolicy({ driver: provider, modelPolicy }).optionSelection === "exact",
       });
   const selectDescriptors = descriptors.filter(
     (descriptor): descriptor is Extract<ProviderOptionDescriptor, { type: "select" }> =>
@@ -236,7 +232,6 @@ function getTraitsSectionVisibility(input: {
     input.modelOptions,
     input.allowPromptInjectedEffort ?? true,
     input.planModeEnabled,
-    input.modelPolicy,
   );
 
   const showEffort = selected.primarySelectDescriptor !== null;

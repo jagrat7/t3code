@@ -381,7 +381,6 @@ function ThreadSettingsSessionProvider(
           ? getProviderOptionDescriptors({
               caps: pendingModel.capabilities,
               selections: pendingModel.selection.options,
-              preserveUnavailableSelections: pendingModel.modelPolicy?.optionSelection === "exact",
             })
           : []
         : props.optionDescriptors,
@@ -1415,15 +1414,10 @@ export function NewTaskThreadSettingsRouteScreen() {
   const optionDescriptors = useMemo(
     () =>
       resolveProviderOptionDescriptors({
-        modelPolicy: flow.selectedModelOption?.modelPolicy,
         capabilities: flow.selectedModelOption?.capabilities,
         selections: flow.selectedModel?.options,
       }),
-    [
-      flow.selectedModel?.options,
-      flow.selectedModelOption?.capabilities,
-      flow.selectedModelOption?.modelPolicy,
-    ],
+    [flow.selectedModel?.options, flow.selectedModelOption?.capabilities],
   );
 
   return (

@@ -44,7 +44,7 @@ function providerDisplayLabel(provider: {
   return provider.instanceId;
 }
 
-function normalizeSelectionOptions(
+export function normalizeSelectionOptions(
   selection: ModelSelection,
   capabilities: ModelCapabilities | null,
 ): ModelSelection {
@@ -238,10 +238,7 @@ export function buildModelOptions(
     const key = `${fallbackModelSelection.instanceId}:${model?.slug ?? fallbackModelSelection.model}`;
     const existing = options.get(key);
     if (existing) {
-      const selection =
-        existing.modelPolicy?.catalogScope === "instance"
-          ? fallbackModelSelection
-          : normalizeSelectionOptions(fallbackModelSelection, existing.capabilities);
+      const selection = normalizeSelectionOptions(fallbackModelSelection, existing.capabilities);
       options.set(key, {
         ...existing,
         ...(model ? { subtitle: modelSubtitle(model, selection) } : {}),

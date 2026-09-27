@@ -10,6 +10,7 @@ import {
   getFusionSelectionSummary,
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
+  getProviderOptionCurrentLabel,
   getProviderOptionDescriptors,
   readCustomModelEntries,
   toCustomModelSetting,
@@ -114,6 +115,35 @@ describe("descriptor helpers", () => {
         currentValue: "200k",
       },
     ]);
+  });
+
+  it("falls back to the catalog default when a saved choice is unavailable", () => {
+    const descriptors = getProviderOptionDescriptors({
+      caps: {
+        optionDescriptors: [
+          {
+            id: "reasoningEffort",
+            label: "Thinking level",
+            type: "select",
+            options: [
+              { id: "medium", label: "Medium", isDefault: true },
+              { id: "max", label: "Max" },
+            ],
+          },
+        ],
+      },
+      selections: [{ id: "reasoningEffort", value: "xhigh" }],
+    });
+
+    expect(
+      descriptors[0]?.type === "select" && descriptors[0].options.map((option) => option.id),
+    ).toEqual(["medium", "max"]);
+    expect(getProviderOptionCurrentLabel(descriptors[0])).toBe("Medium");
+    expect(
+      buildExplicitProviderOptionSelectionsFromDescriptors(descriptors, [
+        { id: "reasoningEffort", value: "xhigh" },
+      ]),
+    ).toEqual([{ id: "reasoningEffort", value: "medium" }]);
   });
 
   it("builds wire-format option selections from descriptors", () => {

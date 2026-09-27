@@ -14,6 +14,7 @@ import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -26,6 +27,7 @@ import * as EffectAcpSchema from "effect-acp/schema";
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
 import { DevinModelCatalog, devinModelVariants, resolveDevinModel } from "./DevinModels.ts";
 import { collectSessionConfigOptionValues } from "./AcpRuntimeModel.ts";
+import { applyDevinNativeModelSelection } from "./DevinNativeModelSelection.ts";
 import { spawnAndCollect } from "../providerSnapshot.ts";
 import type { McpProviderSessionConfig } from "../../mcp/McpProviderSession.ts";
 
@@ -171,10 +173,9 @@ const readDevinModelCatalog = Effect.fn("readDevinModelCatalog")(function* (
 
 export type DevinAcpRuntime = AcpSessionRuntime.AcpSessionRuntime["Service"] & {
   /**
-   * Applies a model selection (family slug plus option choices) by resolving
-   * it against this account's live `devin models list` catalog to the exact
-   * `model_uid` Devin advertises. Returns the applied model id, or the
-   * session's current model when no selection is given.
+   * Applies native model/config choices when supported. Legacy variants and
+   * saved selections use the CLI catalog compatibility path. Returns the
+   * applied model ID; native thinking/speed remain separate controls.
    */
   readonly applyModel: (
     selection?: ModelSelection,
@@ -252,7 +253,25 @@ export const makeDevinAcpRuntime = (
           sameConfigOptions(configOptions, previousConfigOptions)
         )
           return previousModel;
-        const catalog = yield* getCatalog;
+        const readCatalog = yield* Effect.cached(getCatalog);
+        const native = yield* applyDevinNativeModelSelection({
+          runtime: { ...runtime, setModel },
+          selection,
+          getCatalog: readCatalog,
+        });
+        if (Option.isSome(native)) {
+          previousSelection = selection;
+          previousModel = native.value;
+          previousConfigOptions = yield* runtime.getConfigOptions;
+          return native.value;
+        }
+        // Compatibility only: older CLIs and saved combined variant/Fusion IDs.
+        const legacyConfig = (yield* runtime.getConfigOptions).find(
+          (option) => option.id === "model",
+        );
+        const legacyCurrent =
+          legacyConfig?.type === "select" ? legacyConfig.currentValue : undefined;
+        const catalog = yield* readCatalog;
         const model = resolveDevinModel(catalog, selection);
         if (!model)
           return yield* EffectAcpErrors.AcpRequestError.invalidParams(
@@ -260,7 +279,8 @@ export const makeDevinAcpRuntime = (
           );
         const variants = devinModelVariants(catalog, model);
         const target = variants.find((variant) => variant.model_uid === model);
-        const offered = config?.type === "select" ? collectSessionConfigOptionValues(config) : [];
+        const offered =
+          legacyConfig?.type === "select" ? collectSessionConfigOptionValues(legacyConfig) : [];
         const candidates = variants.filter(
           (variant) =>
             offered.includes(variant.model_uid) && variant.contextWindow === target?.contextWindow,
@@ -270,7 +290,7 @@ export const makeDevinAcpRuntime = (
             ? (candidates.find((variant) => variant.fastMode === target.fastMode) ?? candidates[0])
             : target;
         const modelId = representative?.model_uid ?? model;
-        if (modelId !== current) yield* setModel(modelId);
+        if (modelId !== legacyCurrent) yield* setModel(modelId);
         if (target && representative && modelId !== model) {
           const controls = yield* runtime.getConfigOptions;
           if (

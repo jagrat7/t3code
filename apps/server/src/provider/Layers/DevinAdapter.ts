@@ -1219,8 +1219,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                     ctx.terminalPromptResult = undefined;
                     ctx.turnSettled = yield* Deferred.make<void>();
                   }
-                  // `applyModel` resolved the selection to the exact catalog id —
-                  // that is the model the session is actually running.
+                  // Native family IDs keep thinking and speed in separate controls.
                   ctx.session = {
                     ...ctx.session,
                     ...(appliedModel !== undefined ? { model: appliedModel } : {}),

@@ -4,7 +4,6 @@ import { RadioGroup } from "@base-ui/react/radio-group";
 import { CheckIcon } from "lucide-react";
 import type { ProviderOptionSelection } from "@t3tools/contracts";
 import { cn } from "~/lib/utils";
-import { DevinIcon } from "../Icons";
 import { findFusionLeadPairing, fusionOptionsForModel } from "./fusionModelPicker";
 import { getModelVendorIcon, type ModelEsque } from "./providerIconUtils";
 
@@ -40,10 +39,6 @@ export function FusionModelPicker(props: {
 
   return (
     <div className="flex max-h-86.5 w-max max-w-[calc(100vw-2rem)] flex-col">
-      <div className="flex items-center gap-1.5 border-b border-border/70 px-3 py-2 text-xs">
-        <DevinIcon className="size-3.5 shrink-0" aria-hidden="true" />
-        <span className="font-medium">Fusion</span>
-      </div>
       {selectedSlug && pairing ? (
         <div className="flex min-h-0">
           <FusionColumn

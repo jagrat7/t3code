@@ -1198,6 +1198,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                           data-model-picker-content="true"
                           side="inline-end"
                           align="start"
+                          alignOffset={-5}
                           className="h-auto w-max before:hidden [--viewport-inline-padding:0]"
                           viewportClassName="h-auto w-max overflow-hidden! rounded-[calc(var(--radius-lg)-1px)] p-0 [clip-path:inset(0_round_calc(var(--radius-lg)-1px))]"
                         >
