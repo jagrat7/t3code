@@ -25,7 +25,12 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import * as EffectAcpSchema from "effect-acp/schema";
 
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
-import { DevinModelCatalog, devinModelVariants, resolveDevinModel } from "./DevinModels.ts";
+import {
+  DevinModelCatalog,
+  devinAcpBaseModel,
+  devinModelVariants,
+  resolveDevinModel,
+} from "./DevinModels.ts";
 import { collectSessionConfigOptionValues } from "./AcpRuntimeModel.ts";
 import { applyDevinNativeModelSelection } from "./DevinNativeModelSelection.ts";
 import { spawnAndCollect } from "../providerSnapshot.ts";
@@ -289,14 +294,19 @@ export const makeDevinAcpRuntime = (
           target && !offered.includes(model)
             ? (candidates.find((variant) => variant.fastMode === target.fastMode) ?? candidates[0])
             : target;
-        const modelId = representative?.model_uid ?? model;
+        // Fast Fusion variants can change both lead and sidekick IDs, so
+        // the base pairing may belong to a different selectable family.
+        const modelId = representative?.model_uid ?? devinAcpBaseModel(catalog, model, offered);
+        const appliedRepresentative =
+          representative ??
+          devinModelVariants(catalog, modelId).find((variant) => variant.model_uid === modelId);
         if (modelId !== legacyCurrent) yield* setModel(modelId);
-        if (target && representative && modelId !== model) {
+        if (target && appliedRepresentative && modelId !== model) {
           const controls = yield* runtime.getConfigOptions;
           if (
-            (target.reasoningEffort !== representative.reasoningEffort &&
+            (target.reasoningEffort !== appliedRepresentative.reasoningEffort &&
               !controls.some((option) => option.id === "thought_level")) ||
-            (target.fastMode !== representative.fastMode &&
+            (target.fastMode !== appliedRepresentative.fastMode &&
               !controls.some((option) => option.id === "speed"))
           ) {
             // Older CLIs can accept exact variant IDs missing from their cached picker.

@@ -2239,6 +2239,90 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
       }),
   );
 
+  it.effect("applies Fusion Fast variants whose sidekick also changes with speed", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("devin-fusion-fast-sidekick");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-fusion-fast-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, NodePath.join(tempDir, "argv.txt"), {
+          T3_ACP_DEVIN_MODEL_CONTROLS: "1",
+          T3_ACP_MODEL_IDS: "pair-base",
+          T3_DEVIN_MODELS_JSON: encodeUnknownJsonString({
+            families: [
+              {
+                slug: "opus",
+                family_label: "Opus",
+                variants: [
+                  { model_uid: "opus-high", label: "Opus High" },
+                  { model_uid: "opus-medium-fast", label: "Opus Medium Fast" },
+                ],
+              },
+              {
+                slug: "luna",
+                family_label: "Luna",
+                variants: [
+                  { model_uid: "luna-high", label: "Luna High Thinking" },
+                  { model_uid: "luna-priority", label: "Luna High Thinking Fast" },
+                ],
+              },
+              {
+                slug: "fusion",
+                family_label: "Fusion",
+                variants: [
+                  { model_uid: "pair-base", label: "Fusion (Opus High + Luna High Thinking)" },
+                  {
+                    model_uid: "pair-fast",
+                    label: "Fusion (Opus Medium Fast + Luna High Thinking Fast)",
+                  },
+                ],
+              },
+            ],
+          }),
+        }),
+      );
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("devin"),
+          model: "fusion/opus/luna-priority",
+        },
+      });
+      assert.equal(session.model, "pair-fast");
+      yield* adapter.sendTurn({
+        threadId,
+        input: "restore standard speed",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("devin"),
+          model: "fusion/opus/luna-high",
+        },
+      });
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      const values = requests
+        .filter((r) => r.method === "session/set_config_option")
+        .map((r) => {
+          const p = r.params as { configId: string; value: string };
+          return [p.configId, p.value];
+        });
+      assert.deepStrictEqual(values, [
+        ["model", "pair-base"],
+        ["thought_level", "medium"],
+        ["speed", "fast"],
+        ["thought_level", "high"],
+        ["speed", "standard"],
+      ]);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("resolves a Fusion family selection to the exact pairing id", () =>
     Effect.gen(function* () {
       const adapter = yield* DevinAdapter;

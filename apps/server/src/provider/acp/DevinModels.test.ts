@@ -1,5 +1,5 @@
 import { expect, it } from "@effect/vitest";
-import { devinModels, resolveDevinModel } from "./DevinModels.ts";
+import { devinAcpBaseModel, devinModels, resolveDevinModel } from "./DevinModels.ts";
 
 const lead = {
   slug: "opus",
@@ -17,6 +17,35 @@ const sidekick = {
   variants: [{ model_uid: "native-swe", label: "SWE High" }],
 };
 const catalog = { families: [lead, sidekick] };
+
+it("maps a Fast Fusion sidekick to ACP's base pairing and separate speed control", () => {
+  const catalog = {
+    families: [
+      lead,
+      {
+        ...sidekick,
+        variants: [...sidekick.variants, { model_uid: "swe-priority", label: "SWE High Fast" }],
+      },
+      {
+        slug: "fusion",
+        family_label: "Fusion",
+        variants: [
+          { model_uid: "pair-base", label: "Fusion (Opus High + SWE High)" },
+          { model_uid: "pair-fast", label: "Fusion (Opus Medium Fast + SWE High Fast)" },
+        ],
+      },
+    ],
+  };
+  const selection = devinModels(catalog).find(
+    (model) => model.fusion?.sidekick.id === "swe-priority",
+  )!;
+  const nativeId = resolveDevinModel(catalog, { model: selection.slug })!;
+  expect(nativeId).toBe("pair-fast");
+  expect(devinAcpBaseModel(catalog, nativeId, ["pair-base"])).toBe("pair-base");
+  expect(devinAcpBaseModel(catalog, "pair-base", ["pair-base"])).toBe("pair-base");
+  expect(devinAcpBaseModel(catalog, nativeId, ["pair-fast"])).toBe("pair-fast");
+  expect(devinAcpBaseModel(catalog, nativeId, ["unrelated"])).toBe("pair-fast");
+});
 
 it("groups variants into independent controls, including a single remaining thinking level", () => {
   const models = devinModels(catalog);
@@ -136,6 +165,13 @@ it.each([
   );
   for (const variant of variants)
     expect(resolveDevinModel(catalog, { model: variant.model_uid })).toBe(variant.model_uid);
+});
+
+it("rejects saved Fusion families that are no longer in the account catalog", () => {
+  expect(resolveDevinModel(catalog, { model: "fusion/opus/removed-sidekick" })).toBeUndefined();
+  expect(resolveDevinModel(catalog, { model: "fusion-opus-high-sidekick-swe-high" })).toBe(
+    "fusion-opus-high-sidekick-swe-high",
+  );
 });
 
 it("groups Fusion by lead and exact sidekick while keeping the lead's thinking and speed controls", () => {

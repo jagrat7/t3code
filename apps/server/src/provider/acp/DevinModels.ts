@@ -28,6 +28,48 @@ type Family = Catalog["families"][number];
 type Variant = Family["variants"][number];
 type SelectableFamily = Family & Pick<ServerProviderModel, "fusion">;
 
+/** ACP lists base models; thinking and speed variants use separate setters. */
+export function devinAcpBaseModel(
+  catalog: Catalog,
+  modelId: string,
+  availableModels: ReadonlyArray<string>,
+) {
+  const standalone = catalog.families.flatMap((family) =>
+    family.slug === "fusion"
+      ? []
+      : family.variants.flatMap((variant) => {
+          const traits = variantTraits(family, variant);
+          return traits ? [{ ...variant, ...traits, family: family.slug }] : [];
+        }),
+  );
+  const variants = catalog.families.flatMap((family) =>
+    family.variants.flatMap((variant) => {
+      const pairing = /^Fusion \((.+) \+ (.+)\)$/.exec(variant.label);
+      const lead = standalone.find((entry) => entry.label === (pairing?.[1] ?? variant.label));
+      const sidekick = pairing ? standalone.find((entry) => entry.label === pairing[2]) : undefined;
+      if (!lead || (pairing && !sidekick)) return [];
+      return [{ modelId: variant.model_uid, lead, sidekick }];
+    }),
+  );
+  const target = variants.find((variant) => variant.modelId === modelId);
+  if (!target) return modelId;
+  const base = availableModels.includes(modelId)
+    ? target
+    : variants.find(
+        (variant) =>
+          availableModels.includes(variant.modelId) &&
+          variant.lead.family === target.lead.family &&
+          variant.lead.contextWindow === target.lead.contextWindow &&
+          variant.sidekick?.family === target.sidekick?.family &&
+          variant.sidekick?.reasoningEffort === target.sidekick?.reasoningEffort &&
+          variant.sidekick?.contextWindow === target.sidekick?.contextWindow &&
+          (variant.sidekick?.fastMode === target.sidekick?.fastMode ||
+            (variant.lead.fastMode === variant.sidekick?.fastMode &&
+              target.lead.fastMode === target.sidekick?.fastMode)),
+      );
+  return base?.modelId ?? modelId;
+}
+
 const THINKING_LEVEL_ORDER = [
   "none",
   "minimal",
@@ -211,6 +253,9 @@ export function resolveDevinModel(
   const family = selectableFamilies(catalog).find(
     (family) => family.slug === selection.model || family.aliases?.includes(selection.model),
   );
+  // Fusion family slugs are ours, not native IDs. A removed pairing must not
+  // reach ACP as a custom model, where it only produces "Invalid params".
+  if (!family && selection.model.startsWith("fusion/")) return undefined;
   // Exact native IDs (including custom models) remain valid for existing sessions.
   if (!family) return selection.model;
   const variants = familyVariants(family);
