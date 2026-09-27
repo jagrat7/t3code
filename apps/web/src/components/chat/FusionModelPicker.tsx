@@ -38,11 +38,12 @@ export function FusionModelPicker(props: {
   );
 
   return (
-    <div className="flex max-h-86.5 w-max max-w-[calc(100vw-2rem)] flex-col">
+    <div className="flex max-h-86.5 max-w-[calc(100vw-2rem)] flex-col">
       {selectedSlug && pairing ? (
         <div className="flex min-h-0">
           <FusionColumn
             label="Lead"
+            className="w-44"
             options={leads}
             value={pairing.lead.id}
             onValueChange={(leadId) =>
@@ -51,7 +52,7 @@ export function FusionModelPicker(props: {
           />
           <FusionColumn
             label="Sidekick"
-            className="border-l border-border/70"
+            className="w-56 border-l border-border/70"
             options={sidekicks}
             value={selectedSlug}
             onValueChange={(slug) =>
@@ -75,7 +76,7 @@ function FusionColumn(props: {
 }) {
   const labelId = useId();
   return (
-    <div className={cn("flex max-w-64 min-w-0 flex-col p-1", props.className)}>
+    <div className={cn("flex min-w-0 shrink flex-col p-1", props.className)}>
       <div id={labelId} className="px-2 pt-1.5 pb-1 text-xs font-medium text-muted-foreground">
         {props.label}
       </div>
@@ -98,7 +99,9 @@ function FusionColumn(props: {
               ) : (
                 <span className="size-3.5 shrink-0" aria-hidden="true" />
               )}
-              <span className="min-w-0 flex-1 truncate">{option.label}</span>
+              <span className="min-w-0 flex-1 truncate" title={option.label}>
+                {option.label}
+              </span>
               <Radio.Indicator className="flex shrink-0">
                 <CheckIcon className="size-3.5" aria-hidden="true" />
               </Radio.Indicator>
