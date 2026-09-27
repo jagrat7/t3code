@@ -1998,6 +1998,52 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
       }),
   );
 
+  it.effect(
+    "applies native controls even when the entire family is missing from cached choices",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* DevinAdapter;
+        const settings = yield* ServerSettingsService;
+        const threadId = ThreadId.make("devin-missing-family-controls");
+        const tempDir = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-missing-family-")),
+        );
+        const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+        const wrapperPath = yield* Effect.promise(() =>
+          makeProbeWrapper(requestLogPath, NodePath.join(tempDir, "argv.txt"), {
+            T3_ACP_DEVIN_MODEL_CONTROLS: "1",
+            T3_ACP_MODEL_IDS: "native-swe",
+            T3_ACP_ACCEPTED_MODEL_IDS: FAMILY_MODEL_IDS,
+            T3_DEVIN_MODELS_JSON: FAMILY_MODELS_JSON,
+          }),
+        );
+        yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+        yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("devin"),
+            model: "opus-medium-fast",
+          },
+        });
+        const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+        const values = requests
+          .filter((r) => r.method === "session/set_config_option")
+          .map((r) => {
+            const p = r.params as { configId: string; value: string };
+            return [p.configId, p.value];
+          });
+        assert.deepStrictEqual(values, [
+          ["model", "opus-medium-fast"],
+          ["thought_level", "medium"],
+          ["speed", "fast"],
+        ]);
+        yield* adapter.stopSession(threadId);
+      }),
+  );
+
   it.effect("resolves a Fusion family selection to the exact pairing id", () =>
     Effect.gen(function* () {
       const adapter = yield* DevinAdapter;

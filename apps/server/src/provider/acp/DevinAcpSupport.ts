@@ -265,7 +265,7 @@ export const makeDevinAcpRuntime = (
           (variant) =>
             offered.includes(variant.model_uid) && variant.contextWindow === target?.contextWindow,
         );
-        let representative =
+        const representative =
           target && !offered.includes(model)
             ? (candidates.find((variant) => variant.fastMode === target.fastMode) ?? candidates[0])
             : target;
@@ -281,10 +281,9 @@ export const makeDevinAcpRuntime = (
           ) {
             // Older CLIs can accept exact variant IDs missing from their cached picker.
             yield* setModel(model);
-            representative = target;
           }
         }
-        if (target && representative) {
+        if (target) {
           for (const [id, value] of [
             ["thought_level", target.reasoningEffort],
             ["speed", target.fastMode ? "fast" : "standard"],
