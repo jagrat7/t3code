@@ -1,8 +1,6 @@
 import { useId, useState } from "react";
-import { ArrowLeftIcon } from "lucide-react";
 import type { ProviderOptionSelection } from "@t3tools/contracts";
 import { getFusionSelectionSummary } from "@t3tools/shared/model";
-import { Button } from "../ui/button";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { DevinIcon } from "../Icons";
 import { composerFloatingLayerProps } from "./composerEventScope";
@@ -15,7 +13,6 @@ export function FusionModelPicker(props: {
   model: string;
   providerName: string;
   modelOptions?: ReadonlyArray<ProviderOptionSelection> | undefined;
-  onBack: () => void;
   onSelect: (model: string, options?: ReadonlyArray<ProviderOptionSelection>) => void;
 }) {
   const leadLabelId = useId();
@@ -122,22 +119,10 @@ export function FusionModelPicker(props: {
           </div>
         ) : (
           <p className="p-4 text-sm text-muted-foreground">
-            This pairing is no longer available. Go back to choose another model.
+            This pairing is no longer available. Pick another model.
           </p>
         )}
       </div>
-      <footer className="flex items-center border-t border-border/70 px-3 py-2.5">
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={props.onBack}
-          aria-label="Back to models"
-          autoFocus
-        >
-          <ArrowLeftIcon className="size-3.5" />
-          Models
-        </Button>
-      </footer>
     </div>
   );
 }
