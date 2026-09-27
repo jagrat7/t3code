@@ -10,9 +10,17 @@ import { resolveSelectableModel } from "@t3tools/shared/model";
 import { getFusionSelectionSummary } from "@t3tools/shared/model";
 import { useAtomValue } from "@effect/atom-react";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
-import { memo, useMemo, useState, useCallback, useEffect, useLayoutEffect, useRef } from "react";
-import { ChevronRightIcon, SearchIcon, StarIcon } from "lucide-react";
-import { DevinIcon } from "../Icons";
+import {
+  memo,
+  useMemo,
+  useState,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  type ComponentProps,
+} from "react";
+import { ChevronRightIcon, SearchIcon } from "lucide-react";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { FusionModelPicker } from "./FusionModelPicker";
 import { collapseFusionModels, fusionOptionsForModel } from "./fusionModelPicker";
@@ -45,7 +53,7 @@ import {
 import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
 import { getVirtualizedScrollFadeClassName } from "../ui/scroll-area";
-import { Tooltip, TooltipPopup, TooltipTrigger, TooltipProvider } from "../ui/tooltip";
+import { TooltipProvider } from "../ui/tooltip";
 import { Button } from "../ui/button";
 import {
   isProviderInstancePickerReady,
@@ -243,11 +251,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     () => new Set(selectedModelKeys ?? (activeModelKey ? [activeModelKey] : [])),
     [selectedModelKeys, activeModelKey],
   );
-  const [fusionSelection, setFusionSelection] = useState<{
-    instanceId: ProviderInstanceId;
-    model: string;
-  } | null>(() =>
-    activeModel?.fusion ? { instanceId: props.activeInstanceId, model: activeModel.slug } : null,
+  // Account whose Fusion editor is showing. It opens on hover or the row's
+  // first activation, never on its own when the picker opens.
+  const [fusionEditorInstanceId, setFusionEditorInstanceId] = useState<ProviderInstanceId | null>(
+    null,
   );
   const activeInstanceHasSelectableUnavailableModel =
     activeEntry !== undefined &&
@@ -301,11 +308,12 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const handleSelectInstance = useCallback(
     (instanceId: ProviderInstanceId | "favorites") => {
       setSelectedInstanceId(instanceId);
+      setFusionEditorInstanceId(null);
       window.requestAnimationFrame(() => {
         focusSearchInput();
       });
     },
-    [focusSearchInput],
+    [focusSearchInput, setFusionEditorInstanceId],
   );
 
   useLayoutEffect(() => {
@@ -422,10 +430,11 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
 
   const isLocked = props.lockedProvider !== null;
   const isSearching = searchQuery.trim().length > 0;
-  // The fusion editor pops up beside its row wherever selecting the row would
-  // have opened it — everywhere except the favorites rail and multi-select,
-  // where Fusion stays a plain select/toggle.
-  const canOpenFusionPicker = !onToggleModel && (selectedInstanceId !== "favorites" || isSearching);
+  // The Fusion editor rewrites the one selected model, so it stays off the
+  // favorites rail and out of an active multi-model selection. Pickers that
+  // merely allow shift-click to add models (new threads) still get it.
+  const canOpenFusionPicker =
+    selectedModelKeys === undefined && (selectedInstanceId !== "favorites" || isSearching);
   const lockedDisabledInstanceIds = useMemo(() => {
     if (!isLocked) {
       return undefined;
@@ -600,15 +609,15 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     ];
   }, [filteredModels, legacySection]);
 
-  // The popup anchors to its row, so a selection only counts while that row
-  // is rendered — a sidebar switch or a search can remove it mid-edit.
-  const openFusionSelection =
-    fusionSelection !== null &&
+  // The popup anchors to its row, so the editor only counts while that row is
+  // rendered — a provider refresh can remove it mid-edit.
+  const openFusionInstanceId =
+    fusionEditorInstanceId !== null &&
     canOpenFusionPicker &&
     visibleModels.some(
-      (model) => model.isFusionGroup && model.instanceId === fusionSelection.instanceId,
+      (model) => model.isFusionGroup && model.instanceId === fusionEditorInstanceId,
     )
-      ? fusionSelection
+      ? fusionEditorInstanceId
       : null;
 
   const selectedEntry =
@@ -645,9 +654,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       const option = modelOptionsByInstance
         .get(instanceId)
         ?.find((model) => model.slug === modelSlug);
-      if (option?.fusion && !option.isUnavailable && canOpenFusionPicker) {
-        setFusionSelection({ instanceId, model: modelSlug });
-        if (!getModelDisabledReason?.(instanceId, modelSlug)) {
+      if (option?.fusion && !option.isUnavailable && canOpenFusionPicker && !additive) {
+        const isEnabled = !getModelDisabledReason?.(instanceId, modelSlug);
+        if (isEnabled) {
           onInstanceModelChange(
             instanceId,
             modelSlug,
@@ -656,6 +665,14 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
               instanceId === props.activeInstanceId ? props.activeModelOptions : undefined,
             ),
           );
+        }
+        // Once the editor is showing (usually from hover), choosing the row
+        // commits like any other model. Without hover — touch or keyboard —
+        // the first activation opens the editor instead.
+        if (isEnabled && openFusionInstanceId === instanceId) {
+          props.onRequestClose?.();
+        } else {
+          setFusionEditorInstanceId(instanceId);
         }
         return;
       }
@@ -690,8 +707,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       modelOptionsByInstance,
       onInstanceModelChange,
       onToggleModel,
+      openFusionInstanceId,
       props,
-      setFusionSelection,
+      setFusionEditorInstanceId,
     ],
   );
 
@@ -771,6 +789,15 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       ),
     [visibleModels],
   );
+  // One Fusion row per account: keying it by instance keeps the row — and its
+  // anchored editor — mounted while editing rewrites the representative slug.
+  const modelListItemKey = useCallback(
+    (modelKey: string) => {
+      const item = filteredModelByKey.get(modelKey);
+      return item?.isFusionGroup ? `fusion-group:${item.instanceId}` : modelKey;
+    },
+    [filteredModelByKey],
+  );
   const updateModelListScrollFades = useCallback(() => {
     const scrollElement = modelListRef.current?.getScrollableNode();
     if (!(scrollElement instanceof HTMLElement)) {
@@ -806,14 +833,31 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     }
     return mapping.size > 0 ? mapping : EMPTY_MODEL_JUMP_LABELS;
   }, [keybindings, modelJumpCommandByKey, modelJumpShortcutContext]);
+  // Rows re-render only when their key, the data, or this value changes, so
+  // everything a row reads beyond its model belongs here.
+  const activeModelOptions = props.activeModelOptions;
   const modelListExtraData = useMemo(
-    () => ({ favoritesSet, modelJumpLabelByKey, activeModelKey, selectedModelKeySet }),
-    [favoritesSet, modelJumpLabelByKey, activeModelKey, selectedModelKeySet],
+    () => ({
+      favoritesSet,
+      modelJumpLabelByKey,
+      activeModelKey,
+      activeModelOptions,
+      selectedModelKeySet,
+      openFusionInstanceId,
+    }),
+    [
+      favoritesSet,
+      modelJumpLabelByKey,
+      activeModelKey,
+      activeModelOptions,
+      selectedModelKeySet,
+      openFusionInstanceId,
+    ],
   );
 
   useEffect(() => {
     const onWindowKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (openFusionSelection || event.defaultPrevented || event.repeat || isCommandPaletteOpen()) {
+      if (event.defaultPrevented || event.repeat || isCommandPaletteOpen()) {
         return;
       }
 
@@ -868,7 +912,6 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     selectableUnavailableInstanceIds,
     selectedInstanceId,
     sidebarInstanceEntries,
-    openFusionSelection,
   ]);
 
   useLayoutEffect(() => {
@@ -975,7 +1018,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                     <SearchIcon className="-translate-x-0.5 size-4 shrink-0 text-muted-foreground opacity-70" />
                   }
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value);
+                    setFusionEditorInstanceId(null);
+                  }}
                   onKeyDown={(e) => {
                     if (
                       showSidebar &&
@@ -1004,8 +1050,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                       e.stopPropagation();
                       // An open Fusion popup is the top layer — dismiss it
                       // before the picker itself.
-                      if (openFusionSelection) {
-                        setFusionSelection(null);
+                      if (openFusionInstanceId) {
+                        setFusionEditorInstanceId(null);
                         return;
                       }
                       props.onRequestClose?.();
@@ -1047,13 +1093,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                   ref={modelListRef}
                   data={filteredItemKeys}
                   extraData={modelListExtraData}
-                  keyExtractor={(modelKey) => {
-                    const item = filteredModelByKey.get(modelKey);
-                    // One Fusion row per account: keying it by instance keeps
-                    // the row — and the anchored popup — mounted while editing
-                    // the pairing rewrites the representative slug.
-                    return item?.isFusionGroup ? `fusion-group:${item.instanceId}` : modelKey;
-                  }}
+                  keyExtractor={modelListItemKey}
                   renderItem={({ item: modelKey, index }) => {
                     if (legacySection?.key === modelKey) {
                       return (
@@ -1084,153 +1124,30 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                     if (!model) {
                       return null;
                     }
-                    if (model.fusion && model.isFusionGroup) {
-                      const isFavorite = favoritesSet.has(
-                        providerModelKey(model.instanceId, model.slug),
-                      );
-                      const fusionInstanceId = model.instanceId;
-                      const row = (
-                        <ComboboxItem
-                          hideIndicator
-                          index={index}
-                          value={modelKey}
-                          // The popover trigger props target buttons; keep the
-                          // row an unfocusable option for the combobox.
-                          role="option"
-                          tabIndex={-1}
-                          className="w-full min-w-0 cursor-pointer rounded-md px-2 py-2"
-                          contentClassName="flex w-full min-w-0 items-center gap-3"
-                        >
-                          <div className="min-w-0 flex-1 text-left">
-                            <div className="text-xs font-medium leading-snug">Fusion</div>
-                            <div className="mt-1 flex items-center gap-1.5">
-                              <DevinIcon className="size-3 shrink-0" />
-                              <Tooltip>
-                                <TooltipTrigger
-                                  render={
-                                    <span className="truncate text-xs font-normal leading-snug text-muted-foreground/70" />
-                                  }
-                                >
-                                  {getFusionSelectionSummary({
-                                    fusion: model.fusion,
-                                    capabilities: model.capabilities,
-                                    selections:
-                                      model.instanceId === props.activeInstanceId &&
-                                      model.slug === activeModelSlug
-                                        ? props.activeModelOptions
-                                        : undefined,
-                                  })}
-                                </TooltipTrigger>
-                                <TooltipPopup>
-                                  {model.instanceDisplayName} ·{" "}
-                                  {getFusionSelectionSummary({
-                                    fusion: model.fusion,
-                                    capabilities: model.capabilities,
-                                    selections:
-                                      model.instanceId === props.activeInstanceId &&
-                                      model.slug === activeModelSlug
-                                        ? props.activeModelOptions
-                                        : undefined,
-                                  })}
-                                </TooltipPopup>
-                              </Tooltip>
-                            </div>
-                          </div>
-                          <Button
-                            size="icon-xs"
-                            variant="ghost"
-                            className="shrink-0 text-muted-foreground/70 hover:text-foreground"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              toggleFavorite(model.instanceId, model.slug);
-                            }}
-                            onKeyDown={(event) => event.stopPropagation()}
-                            aria-label={isFavorite ? "Remove from favorites" : "Add to favorites"}
-                          >
-                            <StarIcon
-                              className={cn(
-                                "size-3.5 sm:size-3",
-                                isFavorite && "fill-current text-yellow-500",
-                              )}
-                            />
-                          </Button>
-                          <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                        </ComboboxItem>
-                      );
-                      if (!canOpenFusionPicker) {
-                        return row;
-                      }
-                      return (
-                        <Popover
-                          open={openFusionSelection?.instanceId === fusionInstanceId}
-                          onOpenChange={(open) => {
-                            if (open) {
-                              setFusionSelection({
-                                instanceId: fusionInstanceId,
-                                model: model.slug,
-                              });
-                              return;
-                            }
-                            setFusionSelection((current) =>
-                              current?.instanceId === fusionInstanceId ? null : current,
-                            );
-                            window.requestAnimationFrame(focusSearchInput);
-                          }}
-                        >
-                          <PopoverTrigger
-                            nativeButton={false}
-                            openOnHover
-                            delay={150}
-                            closeDelay={150}
-                            render={row}
-                          />
-                          <PopoverPopup
-                            {...composerFloatingLayerProps}
-                            data-model-picker-content="true"
-                            side="right"
-                            align="start"
-                            className="h-auto w-max before:hidden [--viewport-inline-padding:0]"
-                            viewportClassName="h-auto w-max overflow-hidden! rounded-[calc(var(--radius-lg)-1px)] p-0 [clip-path:inset(0_round_calc(var(--radius-lg)-1px))]"
-                          >
-                            <FusionModelPicker
-                              models={flatModels.filter(
-                                (entry) =>
-                                  entry.instanceId === fusionInstanceId &&
-                                  entry.fusion &&
-                                  !entry.isUnavailable &&
-                                  matchesLockedProvider(entry) &&
-                                  !getModelDisabledReason?.(fusionInstanceId, entry.slug),
-                              )}
-                              model={
-                                openFusionSelection?.instanceId === fusionInstanceId
-                                  ? openFusionSelection.model
-                                  : model.slug
-                              }
-                              modelOptions={
-                                fusionInstanceId === props.activeInstanceId
-                                  ? props.activeModelOptions
-                                  : undefined
-                              }
-                              providerName={model.instanceDisplayName}
-                              onSelect={(slug, options) =>
-                                onInstanceModelChange(fusionInstanceId, slug, options)
-                              }
-                            />
-                          </PopoverPopup>
-                        </Popover>
-                      );
-                    }
                     const disabledReason =
                       getModelDisabledReason?.(model.instanceId, model.slug) ?? null;
-                    return (
+                    const fusion = model.isFusionGroup ? model.fusion : undefined;
+                    const renderRow = (popupTriggerProps?: ComponentProps<"div">) => (
                       <ModelListRow
-                        key={modelKey}
+                        key={modelListItemKey(modelKey)}
                         index={index}
                         model={model}
                         instanceId={model.instanceId}
                         driverKind={model.driverKind}
                         providerDisplayName={model.instanceDisplayName}
                         providerAccentColor={model.instanceAccentColor}
+                        description={
+                          fusion
+                            ? getFusionSelectionSummary({
+                                fusion,
+                                capabilities: model.capabilities,
+                                selections:
+                                  modelKey === activeModelKey
+                                    ? props.activeModelOptions
+                                    : undefined,
+                              })
+                            : undefined
+                        }
                         isFavorite={favoritesSet.has(
                           providerModelKey(model.instanceId, model.slug),
                         )}
@@ -1247,8 +1164,64 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                         unavailable={model.isUnavailable === true}
                         jumpLabel={modelJumpLabelByKey.get(modelKey) ?? null}
                         disabledReason={disabledReason}
+                        popupTriggerProps={popupTriggerProps}
                         onToggleFavorite={() => toggleFavorite(model.instanceId, model.slug)}
                       />
+                    );
+                    if (!fusion || !canOpenFusionPicker || disabledReason) {
+                      return renderRow();
+                    }
+                    const fusionInstanceId = model.instanceId;
+                    return (
+                      <Popover
+                        open={openFusionInstanceId === fusionInstanceId}
+                        onOpenChange={(open) => {
+                          if (open) {
+                            setFusionEditorInstanceId(fusionInstanceId);
+                            return;
+                          }
+                          setFusionEditorInstanceId((current) =>
+                            current === fusionInstanceId ? null : current,
+                          );
+                          window.requestAnimationFrame(focusSearchInput);
+                        }}
+                      >
+                        <PopoverTrigger
+                          nativeButton={false}
+                          openOnHover
+                          delay={150}
+                          closeDelay={150}
+                          render={(triggerProps) => renderRow(triggerProps)}
+                        />
+                        <PopoverPopup
+                          {...composerFloatingLayerProps}
+                          data-model-picker-content="true"
+                          side="inline-end"
+                          align="start"
+                          className="h-auto w-max before:hidden [--viewport-inline-padding:0]"
+                          viewportClassName="h-auto w-max overflow-hidden! rounded-[calc(var(--radius-lg)-1px)] p-0 [clip-path:inset(0_round_calc(var(--radius-lg)-1px))]"
+                        >
+                          <FusionModelPicker
+                            models={flatModels.filter(
+                              (entry) =>
+                                entry.instanceId === fusionInstanceId &&
+                                entry.fusion &&
+                                !entry.isUnavailable &&
+                                matchesLockedProvider(entry) &&
+                                !getModelDisabledReason?.(fusionInstanceId, entry.slug),
+                            )}
+                            model={model.slug}
+                            modelOptions={
+                              fusionInstanceId === props.activeInstanceId
+                                ? props.activeModelOptions
+                                : undefined
+                            }
+                            onSelect={(slug, options) =>
+                              onInstanceModelChange(fusionInstanceId, slug, options)
+                            }
+                          />
+                        </PopoverPopup>
+                      </Popover>
                     );
                   }}
                   estimatedItemSize={52}

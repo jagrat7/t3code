@@ -286,6 +286,12 @@ export const DevinIcon: Icon = ({ className, ...props }) => (
   </svg>
 );
 
+export const ZaiIcon: Icon = ({ className, ...props }) => (
+  <svg {...props} viewBox="0 0 24 24" className={cn("fill-black dark:fill-white", className)}>
+    <path d="M12.105 2L9.927 4.953H.653L2.83 2h9.276zM23.254 19.048L21.078 22h-9.242l2.174-2.952h9.244zM24 2L9.264 22H0L14.736 2H24z" />
+  </svg>
+);
+
 export const TraeIcon: Icon = (props) => (
   <svg {...props} viewBox="0 0 24 24" fill="currentColor">
     {/* Back rectangle: left strip + bottom strip drawn separately — empty bottom-left corner is the gap between them */}

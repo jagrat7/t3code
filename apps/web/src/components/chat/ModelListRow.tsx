@@ -1,6 +1,6 @@
 import { type ProviderDriverKind, type ProviderInstanceId } from "@t3tools/contracts";
-import { memo } from "react";
-import { CheckIcon, StarIcon } from "lucide-react";
+import { memo, type ComponentProps } from "react";
+import { CheckIcon, ChevronRightIcon, StarIcon } from "lucide-react";
 import {
   getDisplayModelName,
   getTriggerDisplayModelLabel,
@@ -29,6 +29,8 @@ export const ModelListRow = memo(function ModelListRow(props: {
    */
   providerDisplayName: string;
   providerAccentColor?: string | undefined;
+  /** Replaces the provider label on the secondary line. */
+  description?: string | undefined;
   isFavorite: boolean;
   isSelected: boolean;
   showSelection?: boolean;
@@ -39,15 +41,22 @@ export const ModelListRow = memo(function ModelListRow(props: {
   unavailable?: boolean;
   jumpLabel?: string | null;
   disabledReason?: string | null;
+  /** Props from a side popup's trigger. The row then shows a chevron, like a submenu. */
+  popupTriggerProps?: ComponentProps<"div"> | undefined;
   onToggleFavorite: () => void;
 }) {
   const ProviderIcon = PROVIDER_ICON_BY_PROVIDER[props.driverKind] ?? null;
-  const providerLabel = props.model.subProvider
-    ? `${props.providerDisplayName} · ${props.model.subProvider}`
-    : props.providerDisplayName;
+  const providerLabel =
+    props.description ??
+    (props.model.subProvider
+      ? `${props.providerDisplayName} · ${props.model.subProvider}`
+      : props.providerDisplayName);
 
   const row = (
     <ComboboxItem
+      {...props.popupTriggerProps}
+      // Trigger props target buttons; keep the row an unfocusable combobox option.
+      {...(props.popupTriggerProps ? { role: "option", tabIndex: -1 } : {})}
       hideIndicator
       index={props.index}
       value={modelPickerModelKey(props.instanceId, props.model.slug)}
@@ -55,7 +64,7 @@ export const ModelListRow = memo(function ModelListRow(props: {
       contentClassName="flex w-full items-center gap-3"
       className={cn(
         "group relative w-full !min-w-0 max-w-full cursor-pointer rounded-md px-2 py-2 transition-[background-color,box-shadow,color]",
-        "hover:bg-[color-mix(in_srgb,var(--popover)_90%,var(--contrast-foreground))] data-highlighted:bg-[color-mix(in_srgb,var(--popover)_90%,var(--contrast-foreground))] data-selected:bg-foreground/[0.08] data-selected:text-foreground data-selected:ring-0 [&[data-highlighted][data-selected]]:bg-[color-mix(in_srgb,var(--popover)_90%,var(--contrast-foreground))]",
+        "hover:bg-[color-mix(in_srgb,var(--popover)_90%,var(--contrast-foreground))] data-highlighted:bg-[color-mix(in_srgb,var(--popover)_90%,var(--contrast-foreground))] data-selected:bg-foreground/[0.08] data-selected:text-foreground data-selected:ring-0 [&[data-highlighted][data-selected]]:bg-[color-mix(in_srgb,var(--popover)_90%,var(--contrast-foreground))] data-popup-open:bg-[color-mix(in_srgb,var(--popover)_90%,var(--contrast-foreground))]",
         props.disabledReason &&
           "data-disabled:pointer-events-auto data-disabled:cursor-not-allowed data-disabled:hover:bg-transparent",
       )}
@@ -132,6 +141,9 @@ export const ModelListRow = memo(function ModelListRow(props: {
             {props.isFavorite ? "Remove from favorites" : "Add to favorites"}
           </TooltipPopup>
         </Tooltip>
+        {props.popupTriggerProps ? (
+          <ChevronRightIcon className="-me-0.5 size-3.5 opacity-80" aria-hidden="true" />
+        ) : null}
       </div>
     </ComboboxItem>
   );

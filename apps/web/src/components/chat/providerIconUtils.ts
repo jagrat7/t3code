@@ -12,6 +12,7 @@ import {
   Icon,
   OpenAI,
   OpenCodeIcon,
+  ZaiIcon,
 } from "../Icons";
 
 export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>> = {
@@ -23,6 +24,20 @@ export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>
   [ProviderDriverKind.make("antigravity")]: AntigravityIcon,
   [ProviderDriverKind.make("devin")]: DevinIcon,
 };
+
+// Fusion lists models from several vendors under one provider, so each
+// entry is marked by the vendor its display name starts with.
+const MODEL_VENDOR_ICONS: ReadonlyArray<readonly [RegExp, Icon]> = [
+  [/^claude\b/i, ClaudeAI],
+  [/^gpt\b|^o\d/i, OpenAI],
+  [/^grok\b/i, GrokIcon],
+  [/^swe\b/i, DevinIcon],
+  [/^glm\b/i, ZaiIcon],
+];
+
+export function getModelVendorIcon(name: string): Icon | null {
+  return MODEL_VENDOR_ICONS.find(([pattern]) => pattern.test(name))?.[1] ?? null;
+}
 
 export type ModelEsque = {
   isFusionGroup?: boolean;
