@@ -124,6 +124,19 @@ function selectableFamilies(catalog: Catalog): ReadonlyArray<SelectableFamily> {
   });
 }
 
+/** Native ACP may advertise one representative per family and separate thinking/speed controls. */
+export function devinModelVariants(catalog: Catalog, model: string) {
+  const family = selectableFamilies(catalog).find((family) =>
+    family.variants.some((variant) => variant.model_uid === model),
+  );
+  return (
+    family?.variants.flatMap((variant) => {
+      const traits = variantTraits(family, variant);
+      return traits ? [{ ...variant, ...traits }] : [];
+    }) ?? []
+  );
+}
+
 export function devinModels(catalog: Catalog): ServerProviderModel[] {
   return selectableFamilies(catalog).flatMap((family): ServerProviderModel[] => {
     const variants = familyVariants(family);

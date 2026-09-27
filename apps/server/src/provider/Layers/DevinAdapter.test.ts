@@ -1084,76 +1084,112 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
     }),
   );
 
-  it.effect("starts a fresh turn when a replacement is sent during native cancellation", () =>
-    Effect.gen(function* () {
-      const adapter = yield* DevinAdapter;
-      const settings = yield* ServerSettingsService;
-      const threadId = ThreadId.make("devin-cancel-replace");
-      const wrapperPath = yield* Effect.promise(() =>
-        makeMockAgentWrapper({
-          T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL: "1",
-          T3_ACP_CANCEL_RELEASE_PERMISSION: "1",
+  for (const separateControls of [false, true]) {
+    it.effect(
+      `starts a fresh turn with changed thinking during native cancellation (separate controls: ${separateControls})`,
+      () =>
+        Effect.gen(function* () {
+          const adapter = yield* DevinAdapter;
+          const settings = yield* ServerSettingsService;
+          const threadId = ThreadId.make("devin-cancel-replace");
+          const wrapperPath = yield* Effect.promise(() =>
+            makeMockAgentWrapper({
+              T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL: "1",
+              T3_ACP_CANCEL_RELEASE_PERMISSION: "1",
+              T3_ACP_DEVIN_MODEL_CONTROLS: separateControls ? "1" : "0",
+              T3_ACP_MODEL_IDS: separateControls ? "swe-2-high" : "swe-2-high,swe-2-medium",
+              T3_DEVIN_MODELS_JSON: encodeUnknownJsonString({
+                families: [
+                  {
+                    slug: "swe-2",
+                    family_label: "SWE-2",
+                    variants: [
+                      { model_uid: "swe-2-high", label: "SWE-2 High" },
+                      { model_uid: "swe-2-medium", label: "SWE-2 Medium" },
+                    ],
+                  },
+                ],
+              }),
+            }),
+          );
+          yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+          const toolStarted = yield* Deferred.make<void>();
+          const cancelWaiting = yield* Deferred.make<ApprovalRequestId>();
+          const events: Array<ProviderRuntimeEvent> = [];
+          yield* Stream.runForEach(adapter.streamEvents, (event) => {
+            if (event.threadId !== threadId) return Effect.void;
+            events.push(event);
+            if (event.type === "item.updated" && event.itemId === "native-cancel-tool")
+              return Deferred.succeed(toolStarted, undefined);
+            if (event.type === "request.opened" && event.requestId)
+              return Deferred.succeed(cancelWaiting, ApprovalRequestId.make(event.requestId));
+            return Effect.void;
+          }).pipe(Effect.forkChild);
+          yield* adapter.startSession({
+            threadId,
+            provider: ProviderDriverKind.make("devin"),
+            cwd: process.cwd(),
+            runtimeMode: "auto",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("devin"),
+              model: "swe-2",
+              options: [{ id: "reasoningEffort", value: "high" }],
+            },
+          });
+          const first = yield* adapter
+            .sendTurn({ threadId, input: "first task" })
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(toolStarted);
+          const stopping = yield* adapter.interruptTurn(threadId).pipe(Effect.forkChild);
+          const releaseRequest = yield* Deferred.await(cancelWaiting);
+          const replacement = yield* adapter
+            .sendTurn({
+              threadId,
+              input: "replacement task",
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("devin"),
+                model: "swe-2",
+                options: [{ id: "reasoningEffort", value: "medium" }],
+              },
+            })
+            .pipe(Effect.forkChild({ startImmediately: true }));
+          assert.isUndefined(stopping.pollUnsafe());
+          assert.isUndefined(replacement.pollUnsafe());
+          yield* adapter.respondToRequest(threadId, releaseRequest, "accept");
+          yield* Fiber.join(stopping);
+          const firstTurn = yield* Fiber.join(first);
+          const replacementTurn = yield* Fiber.join(replacement);
+          assert.notEqual(firstTurn.turnId, replacementTurn.turnId);
+          assert.equal(
+            (yield* adapter.listSessions()).find((s) => s.threadId === threadId)?.model,
+            "swe-2-medium",
+          );
+          const completed = events.filter((event) => event.type === "turn.completed");
+          assert.deepStrictEqual(
+            completed.map((event) => [event.turnId, event.payload.state]),
+            [
+              [firstTurn.turnId, "cancelled"],
+              [replacementTurn.turnId, "completed"],
+            ],
+          );
+          const replacementStart = events.findIndex(
+            (event) => event.type === "turn.started" && event.turnId === replacementTurn.turnId,
+          );
+          assert.isAbove(
+            replacementStart,
+            events.findIndex(
+              (event) => event.type === "turn.completed" && event.turnId === firstTurn.turnId,
+            ),
+          );
+          const finalOldOutput = events.find(
+            (event) =>
+              event.type === "content.delta" && event.payload.delta === "Request cancelled.",
+          );
+          assert.equal(finalOldOutput?.turnId, firstTurn.turnId);
+          yield* adapter.stopSession(threadId);
         }),
-      );
-      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
-      const toolStarted = yield* Deferred.make<void>();
-      const cancelWaiting = yield* Deferred.make<ApprovalRequestId>();
-      const events: Array<ProviderRuntimeEvent> = [];
-      yield* Stream.runForEach(adapter.streamEvents, (event) => {
-        if (event.threadId !== threadId) return Effect.void;
-        events.push(event);
-        if (event.type === "item.updated" && event.itemId === "native-cancel-tool")
-          return Deferred.succeed(toolStarted, undefined);
-        if (event.type === "request.opened" && event.requestId)
-          return Deferred.succeed(cancelWaiting, ApprovalRequestId.make(event.requestId));
-        return Effect.void;
-      }).pipe(Effect.forkChild);
-      yield* adapter.startSession({
-        threadId,
-        provider: ProviderDriverKind.make("devin"),
-        cwd: process.cwd(),
-        runtimeMode: "auto",
-      });
-      const first = yield* adapter
-        .sendTurn({ threadId, input: "first task" })
-        .pipe(Effect.forkChild);
-      yield* Deferred.await(toolStarted);
-      const stopping = yield* adapter.interruptTurn(threadId).pipe(Effect.forkChild);
-      const releaseRequest = yield* Deferred.await(cancelWaiting);
-      const replacement = yield* adapter
-        .sendTurn({ threadId, input: "replacement task" })
-        .pipe(Effect.forkChild({ startImmediately: true }));
-      assert.isUndefined(stopping.pollUnsafe());
-      assert.isUndefined(replacement.pollUnsafe());
-      yield* adapter.respondToRequest(threadId, releaseRequest, "accept");
-      yield* Fiber.join(stopping);
-      const firstTurn = yield* Fiber.join(first);
-      const replacementTurn = yield* Fiber.join(replacement);
-      assert.notEqual(firstTurn.turnId, replacementTurn.turnId);
-      const completed = events.filter((event) => event.type === "turn.completed");
-      assert.deepStrictEqual(
-        completed.map((event) => [event.turnId, event.payload.state]),
-        [
-          [firstTurn.turnId, "cancelled"],
-          [replacementTurn.turnId, "completed"],
-        ],
-      );
-      const replacementStart = events.findIndex(
-        (event) => event.type === "turn.started" && event.turnId === replacementTurn.turnId,
-      );
-      assert.isAbove(
-        replacementStart,
-        events.findIndex(
-          (event) => event.type === "turn.completed" && event.turnId === firstTurn.turnId,
-        ),
-      );
-      const finalOldOutput = events.find(
-        (event) => event.type === "content.delta" && event.payload.delta === "Request cancelled.",
-      );
-      assert.equal(finalOldOutput?.turnId, firstTurn.turnId);
-      yield* adapter.stopSession(threadId);
-    }),
-  );
+    );
+  }
 
   it.effect("reports failed native cancellation and retires the session before reuse", () =>
     Effect.gen(function* () {
@@ -1744,6 +1780,73 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
   const FAMILY_MODEL_IDS =
     "opus-high,opus-medium,opus-high-fast,opus-medium-fast,native-swe,pair-high,pair-medium,pair-high-fast,pair-medium-fast";
 
+  it.effect(
+    "applies separate Devin thinking and speed controls for families, exact ids, and Fusion",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* DevinAdapter;
+        const settings = yield* ServerSettingsService;
+        const threadId = ThreadId.make("devin-separate-model-controls");
+        const tempDir = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-controls-")),
+        );
+        const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+        const wrapperPath = yield* Effect.promise(() =>
+          makeProbeWrapper(requestLogPath, NodePath.join(tempDir, "argv.txt"), {
+            T3_ACP_DEVIN_MODEL_CONTROLS: "1",
+            T3_ACP_MODEL_IDS: "opus-high,pair-high,native-swe",
+            T3_DEVIN_MODELS_JSON: FAMILY_MODELS_JSON,
+          }),
+        );
+        yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+        yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("devin"),
+            model: "opus",
+            options: [{ id: "reasoningEffort", value: "high" }],
+          },
+        });
+        for (const model of ["opus-medium-fast", "pair-medium-fast", "opus-high"]) {
+          yield* adapter.sendTurn({
+            threadId,
+            input: "continue",
+            modelSelection: { instanceId: ProviderInstanceId.make("devin"), model },
+          });
+          assert.equal(
+            (yield* adapter.listSessions()).find((s) => s.threadId === threadId)?.model,
+            model,
+          );
+        }
+        // Repeat the current selection; native controls must not be reset or resent.
+        yield* adapter.sendTurn({ threadId, input: "continue again" });
+        const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+        assert.deepStrictEqual(
+          requests
+            .filter((r) => r.method === "session/set_config_option")
+            .map((r) => {
+              const params = r.params as { configId: string; value: string };
+              return [params.configId, params.value];
+            }),
+          [
+            ["model", "opus-high"],
+            ["thought_level", "high"],
+            ["thought_level", "medium"],
+            ["speed", "fast"],
+            ["model", "pair-high"],
+            ["thought_level", "medium"],
+            ["speed", "fast"],
+            ["model", "opus-high"],
+            ["thought_level", "high"],
+          ],
+        );
+        yield* adapter.stopSession(threadId);
+      }),
+  );
+
   it.effect("resolves family selections with options to exact catalog model ids", () =>
     Effect.gen(function* () {
       const adapter = yield* DevinAdapter;
@@ -1809,6 +1912,52 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
 
       yield* adapter.stopSession(threadId);
     }),
+  );
+
+  it.effect(
+    "keeps exact variant selection for older Devin CLIs with incomplete cached choices",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* DevinAdapter;
+        const settings = yield* ServerSettingsService;
+        const threadId = ThreadId.make("devin-legacy-cached-variants");
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockAgentWrapper({
+            T3_ACP_MODEL_IDS: "opus-high,pair-high",
+            T3_ACP_ACCEPTED_MODEL_IDS: FAMILY_MODEL_IDS,
+            T3_DEVIN_MODELS_JSON: FAMILY_MODELS_JSON,
+          }),
+        );
+        yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+        const session = yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("devin"),
+            model: "opus-medium-fast",
+          },
+        });
+        assert.equal(session.model, "opus-medium-fast");
+        yield* adapter.sendTurn({
+          threadId,
+          input: "use Fusion",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("devin"),
+            model: "fusion/opus/native-swe",
+            options: [
+              { id: "reasoningEffort", value: "medium" },
+              { id: "fastMode", value: true },
+            ],
+          },
+        });
+        assert.equal(
+          (yield* adapter.listSessions()).find((s) => s.threadId === threadId)?.model,
+          "pair-medium-fast",
+        );
+        yield* adapter.stopSession(threadId);
+      }),
   );
 
   it.effect("resolves a Fusion family selection to the exact pairing id", () =>

@@ -21,9 +21,11 @@ import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import * as EffectAcpErrors from "effect-acp/errors";
+import * as EffectAcpSchema from "effect-acp/schema";
 
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
-import { DevinModelCatalog, resolveDevinModel } from "./DevinModels.ts";
+import { DevinModelCatalog, devinModelVariants, resolveDevinModel } from "./DevinModels.ts";
+import { collectSessionConfigOptionValues } from "./AcpRuntimeModel.ts";
 import { spawnAndCollect } from "../providerSnapshot.ts";
 import type { McpProviderSessionConfig } from "../../mcp/McpProviderSession.ts";
 
@@ -117,6 +119,7 @@ export function buildDevinAcpSpawnInput(
 const decodeDevinModelCatalog = Schema.decodeEffect(DevinModelCatalog);
 const isAcpError = Schema.is(EffectAcpErrors.AcpError);
 const sameSelection = Schema.toEquivalence(ModelSelection);
+const sameConfigOptions = Schema.toEquivalence(Schema.Array(EffectAcpSchema.SessionConfigOption));
 
 /** Use the same executable and environment for health checks and actual sessions. */
 export const runDevinCommand = Effect.fn("runDevinCommand")(function* (
@@ -234,27 +237,65 @@ export const makeDevinAcpRuntime = (
       );
     let previousSelection: ModelSelection | undefined;
     let previousModel: string | undefined;
+    let previousConfigOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption> = [];
     return {
       ...runtime,
       setModel,
       applyModel: Effect.fn("DevinAcpRuntime.applyModel")(function* (selection?: ModelSelection) {
-        const config = (yield* runtime.getConfigOptions).find((option) => option.id === "model");
+        const configOptions = yield* runtime.getConfigOptions;
+        const config = configOptions.find((option) => option.id === "model");
         const current = config?.type === "select" ? config.currentValue : undefined;
         if (!selection) return current;
         if (
           previousSelection &&
           sameSelection(selection, previousSelection) &&
-          current === previousModel
+          sameConfigOptions(configOptions, previousConfigOptions)
         )
-          return current;
-        const model = resolveDevinModel(yield* getCatalog, selection);
+          return previousModel;
+        const catalog = yield* getCatalog;
+        const model = resolveDevinModel(catalog, selection);
         if (!model)
           return yield* EffectAcpErrors.AcpRequestError.invalidParams(
             `Devin does not offer the selected thinking, speed, and context combination for ${selection.model}. Refresh provider status and choose an available combination.`,
           );
-        if (model !== current) yield* setModel(model);
+        const variants = devinModelVariants(catalog, model);
+        const target = variants.find((variant) => variant.model_uid === model);
+        const offered = config?.type === "select" ? collectSessionConfigOptionValues(config) : [];
+        const candidates = variants.filter(
+          (variant) =>
+            offered.includes(variant.model_uid) && variant.contextWindow === target?.contextWindow,
+        );
+        let representative =
+          target && !offered.includes(model)
+            ? (candidates.find((variant) => variant.fastMode === target.fastMode) ?? candidates[0])
+            : target;
+        const modelId = representative?.model_uid ?? model;
+        if (modelId !== current) yield* setModel(modelId);
+        if (target && representative && modelId !== model) {
+          const controls = yield* runtime.getConfigOptions;
+          if (
+            (target.reasoningEffort !== representative.reasoningEffort &&
+              !controls.some((option) => option.id === "thought_level")) ||
+            (target.fastMode !== representative.fastMode &&
+              !controls.some((option) => option.id === "speed"))
+          ) {
+            // Older CLIs can accept exact variant IDs missing from their cached picker.
+            yield* setModel(model);
+            representative = target;
+          }
+        }
+        if (target && representative) {
+          for (const [id, value] of [
+            ["thought_level", target.reasoningEffort],
+            ["speed", target.fastMode ? "fast" : "standard"],
+          ] as const) {
+            const option = (yield* runtime.getConfigOptions).find((option) => option.id === id);
+            if (option) yield* runtime.setConfigOption(id, value);
+          }
+        }
         previousSelection = selection;
         previousModel = model;
+        previousConfigOptions = yield* runtime.getConfigOptions;
         return model;
       }),
     };

@@ -62,9 +62,11 @@ const imageCapability = process.env.T3_ACP_IMAGE_CAPABILITY === "1";
 // Devin advertises its MCP extension through agentCapabilities._meta and
 // answers `_cognition.ai/mcp/connectServer`.
 const devinMcpExtension = process.env.T3_ACP_DEVIN_MCP === "1";
+const devinModelControls = process.env.T3_ACP_DEVIN_MODEL_CONTROLS === "1";
 const advertisedModelIds = process.env.T3_ACP_MODEL_IDS?.split(",")
   .map((value) => value.trim())
   .filter((value) => value.length > 0);
+const acceptedModelIds = process.env.T3_ACP_ACCEPTED_MODEL_IDS?.split(",") ?? advertisedModelIds;
 const promptResponseText = process.env.T3_ACP_PROMPT_RESPONSE_TEXT;
 const initialGrokReasoningEffort =
   process.env.T3_ACP_INITIAL_GROK_REASONING_EFFORT?.trim() || undefined;
@@ -89,7 +91,7 @@ const sessionId = "mock-session-1";
 let currentModeId = advertisedModeIds?.[0] ?? (antigravityProfile ? "default" : "ask");
 let currentModelId = antigravityProfile ? "gemini-test-low" : "default";
 let parameterizedModelPicker = false;
-let currentReasoning = "medium";
+let currentReasoning = devinModelControls ? "max" : "medium";
 let currentContext = "272k";
 let currentFast = false;
 let promptCount = 0;
@@ -282,6 +284,28 @@ function configOptions(): ReadonlyArray<AcpSchema.SessionConfigOption> {
             { value: "gpt-5.3-codex[reasoning=medium,fast=false]", name: "Codex 5.3" },
           ],
     },
+    ...(devinModelControls && currentModelId !== "default"
+      ? [
+          {
+            id: "thought_level",
+            name: "Thinking",
+            type: "select" as const,
+            currentValue: currentReasoning,
+            options: ["medium", "high", "max"].map((value) => ({ value, name: value })),
+          },
+          ...(currentModelId.startsWith("swe-")
+            ? []
+            : [
+                {
+                  id: "speed",
+                  name: "Speed",
+                  type: "select" as const,
+                  currentValue: currentFast ? "fast" : "standard",
+                  options: ["standard", "fast"].map((value) => ({ value, name: value })),
+                },
+              ]),
+        ]
+      : []),
   ];
 }
 
@@ -616,7 +640,7 @@ const program = Effect.gen(function* () {
         currentModeId = request.value;
       }
       if (request.configId === "model" && typeof request.value === "string") {
-        if (advertisedModelIds && !advertisedModelIds.includes(request.value)) {
+        if (acceptedModelIds && !acceptedModelIds.includes(request.value)) {
           return yield* AcpError.AcpRequestError.invalidParams(
             `Unknown mock model id: ${request.value}`,
             {
@@ -626,7 +650,19 @@ const program = Effect.gen(function* () {
           );
         }
         currentModelId = request.value;
+        if (devinModelControls) {
+          currentReasoning = "max";
+          currentFast = false;
+        }
       }
+      if (
+        devinModelControls &&
+        request.configId === "thought_level" &&
+        typeof request.value === "string"
+      )
+        currentReasoning = request.value;
+      if (devinModelControls && request.configId === "speed")
+        currentFast = request.value === "fast";
       if (request.configId === "reasoning" && typeof request.value === "string") {
         currentReasoning = request.value;
       }
