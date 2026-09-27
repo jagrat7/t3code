@@ -349,6 +349,44 @@ devinAdapterTestLayer("DevinAdapter", (it) => {
     }),
   );
 
+  it.effect("rejects unavailable Plan mode without sending a coding prompt", () =>
+    Effect.gen(function* () {
+      const adapter = yield* DevinAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("devin-missing-plan");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-missing-plan-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, NodePath.join(tempDir, "argv.txt"), {
+          T3_ACP_MODE_IDS: "code,bypass",
+        }),
+      );
+      yield* settings.updateSettings({ providers: { devin: { binaryPath: wrapperPath } } });
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const error = yield* adapter
+        .sendTurn({ threadId, input: "only plan this", interactionMode: "plan" })
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+      assert.include(error.message, "Plan");
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      assert.isFalse(requests.some((request) => request.method === "session/prompt"));
+      yield* adapter.sendTurn({
+        threadId,
+        input: "now implement this",
+        interactionMode: "default",
+      });
+      assert.isTrue(yield* adapter.hasSession(threadId));
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("maps app plan mode onto Devin's ACP session mode", () =>
     Effect.gen(function* () {
       const adapter = yield* DevinAdapter;

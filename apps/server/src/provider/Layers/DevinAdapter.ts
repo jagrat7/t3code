@@ -295,6 +295,16 @@ function resolveRequestedModeId(input: {
   }
 }
 
+const missingDevinModeError = (mode: RuntimeMode | "plan") =>
+  new ProviderAdapterRequestError({
+    provider: PROVIDER,
+    method: "session/set_mode",
+    detail:
+      mode === "plan"
+        ? "Devin CLI does not expose Plan mode. Update the configured CLI or switch to coding mode."
+        : `Devin ACP does not expose '${mode}' coding. Select Auto, Auto-accept edits, or Full access. Ask mode is read-only.`,
+  });
+
 function applyRequestedSessionConfiguration<E>(input: {
   readonly runtime: DevinAcpRuntime;
   readonly runtimeMode: RuntimeMode;
@@ -304,9 +314,22 @@ function applyRequestedSessionConfiguration<E>(input: {
     readonly cause: import("effect-acp/errors").AcpError;
     readonly method: "session/set_config_option" | "session/set_mode";
   }) => E;
-  readonly missingModeError: (runtimeMode: RuntimeMode) => E;
+  readonly missingModeError: (mode: RuntimeMode | "plan") => E;
 }): Effect.Effect<string | undefined, E> {
   return Effect.gen(function* () {
+    const requestedModeId = resolveRequestedModeId({
+      interactionMode: input.interactionMode,
+      runtimeMode: input.runtimeMode,
+      modeState: yield* input.runtime.getModeState,
+    });
+    if (
+      !requestedModeId &&
+      (input.interactionMode === "plan" || input.runtimeMode === "approval-required")
+    ) {
+      return yield* Effect.fail(
+        input.missingModeError(input.interactionMode === "plan" ? "plan" : input.runtimeMode),
+      );
+    }
     const appliedModel =
       input.modelSelection !== undefined
         ? yield* input.runtime.applyModel(input.modelSelection).pipe(
@@ -319,17 +342,7 @@ function applyRequestedSessionConfiguration<E>(input: {
           )
         : undefined;
 
-    const requestedModeId = resolveRequestedModeId({
-      interactionMode: input.interactionMode,
-      runtimeMode: input.runtimeMode,
-      modeState: yield* input.runtime.getModeState,
-    });
-    if (!requestedModeId) {
-      if (input.interactionMode !== "plan" && input.runtimeMode === "approval-required") {
-        return yield* Effect.fail(input.missingModeError(input.runtimeMode));
-      }
-      return appliedModel;
-    }
+    if (!requestedModeId) return appliedModel;
 
     yield* input.runtime.setMode(requestedModeId).pipe(
       Effect.mapError((cause) =>
@@ -871,12 +884,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             modelSelection: devinModelSelection,
             mapError: ({ cause, method }) =>
               mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
-            missingModeError: (runtimeMode) =>
-              new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "session/set_mode",
-                detail: `Devin ACP does not expose '${runtimeMode}' coding. Select Auto, Auto-accept edits, or Full access. Ask mode is read-only.`,
-              }),
+            missingModeError: missingDevinModeError,
           });
 
           const now = yield* nowIso;
@@ -1114,12 +1122,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
               modelSelection,
               mapError: ({ cause, method }) =>
                 mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
-              missingModeError: (runtimeMode) =>
-                new ProviderAdapterRequestError({
-                  provider: PROVIDER,
-                  method: "session/set_mode",
-                  detail: `Devin ACP does not expose '${runtimeMode}' coding. Select Auto, Auto-accept edits, or Full access. Ask mode is read-only.`,
-                }),
+              missingModeError: missingDevinModeError,
             });
             const promptParts: Array<EffectAcpSchema.ContentBlock> = [];
             const imageAttachments = (input.attachments ?? []).filter(
