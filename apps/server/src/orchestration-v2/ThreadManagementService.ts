@@ -5,7 +5,7 @@ import type {
 } from "./ProjectionStore.ts";
 import {
   type ChatAttachment,
-  type CommandId,
+  CommandId,
   MessageId,
   type ModelSelection,
   type OrchestrationV2Actor,
@@ -29,6 +29,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
 import * as Orchestrator from "./Orchestrator.ts";
@@ -316,6 +317,20 @@ export interface ThreadManagementServiceShape {
   readonly streamStoredEvents: Orchestrator.OrchestratorV2["Service"]["streamStoredEvents"];
   readonly streamStoredEventsFrom: Orchestrator.OrchestratorV2["Service"]["streamStoredEventsFrom"];
   readonly streamDomainEvents: Orchestrator.OrchestratorV2["Service"]["streamDomainEvents"];
+  /**
+   * Settles the thread once this run completes. Kept in memory: a restart,
+   * failure, or stop drops the request, and a newer request for the thread
+   * replaces it.
+   */
+  readonly settleAfterRun: (input: {
+    readonly threadId: ThreadId;
+    readonly runId: RunId;
+  }) => Effect.Effect<void>;
+  /** Called once a run is finalized; settles the thread when the run asked to. */
+  readonly settleIfRequested: (input: {
+    readonly threadId: ThreadId;
+    readonly runId: RunId;
+  }) => Effect.Effect<void>;
 }
 
 export class ThreadManagementService extends Context.Service<
@@ -376,6 +391,7 @@ function latestSteerableRun(
 const make = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+  const settleRequests = yield* Ref.make<ReadonlyMap<ThreadId, RunId>>(new Map());
 
   const ensureLegacyTranscript = Effect.fn(
     "orchestrationV2.threadManagement.ensureLegacyTranscript",
@@ -708,6 +724,34 @@ const make = Effect.gen(function* () {
       return { type: "interrupt_requested", run: interruptibleRun, dispatch } as const;
     });
 
+  const settleAfterRun: ThreadManagementServiceShape["settleAfterRun"] = (input) =>
+    Ref.update(settleRequests, (requests) => new Map(requests).set(input.threadId, input.runId));
+
+  const settleIfRequested: ThreadManagementServiceShape["settleIfRequested"] = (input) =>
+    Effect.gen(function* () {
+      const requested = yield* Ref.modify(settleRequests, (requests) => {
+        if (requests.get(input.threadId) !== input.runId) return [false, requests] as const;
+        const next = new Map(requests);
+        next.delete(input.threadId);
+        return [true, next] as const;
+      });
+      if (!requested) return;
+      const { runs } = yield* orchestrator.getThreadRecords(input.threadId, ["runs"], {
+        runIds: [input.runId],
+      });
+      if (runs.find((run) => run.id === input.runId)?.status !== "completed") return;
+      // Settle's own guard rejects the thread if the user queued more work.
+      yield* dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make(`command:effect:thread.settle-after-run:${input.runId}`),
+        threadId: input.threadId,
+      });
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logInfo("thread was not settled after its run", { ...input, cause }),
+      ),
+    );
+
   return ThreadManagementService.of({
     ensureLegacyTranscript,
     dispatch,
@@ -739,6 +783,8 @@ const make = Effect.gen(function* () {
     streamStoredEvents: orchestrator.streamStoredEvents,
     streamStoredEventsFrom: orchestrator.streamStoredEventsFrom,
     streamDomainEvents: orchestrator.streamDomainEvents,
+    settleAfterRun,
+    settleIfRequested,
   });
 });
 

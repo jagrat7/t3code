@@ -2392,6 +2392,93 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("settles a thread after its requested run completes, once", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("runtime-layer-settle-after-run-thread");
+
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-layer-settle-after-run-create"),
+        threadId,
+        projectId: ProjectId.make("runtime-layer-settle-after-run-project"),
+        title: "Settle after run",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: "/tmp/runtime-layer-settle-after-run",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-layer-settle-after-run-message"),
+        threadId,
+        messageId: MessageId.make("runtime-layer-settle-after-run-message"),
+        text: "Finish, then settle.",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+      });
+      const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+      const finishRun = (status: "completed" | "interrupted") =>
+        Effect.gen(function* () {
+          const now = yield* DateTime.now;
+          yield* eventSink.write({
+            commandId: CommandId.make(`runtime-layer-settle-after-run-${status}`),
+            events: [
+              {
+                id: EventId.make(`runtime-layer-settle-after-run-${status}-event`),
+                type: "run.updated",
+                threadId,
+                runId: run.id,
+                occurredAt: now,
+                payload: { ...run, status, startedAt: now, completedAt: now },
+              },
+            ],
+          });
+        });
+      const settledOverride = orchestrator
+        .getThreadProjection(threadId)
+        .pipe(Effect.map((projection) => projection.thread.settledOverride));
+
+      // A stopped run consumes the request without settling.
+      yield* threads.settleAfterRun({ threadId, runId: run.id });
+      yield* finishRun("interrupted");
+      yield* threads.settleIfRequested({ threadId, runId: run.id });
+      assert.isNull(yield* settledOverride);
+
+      yield* finishRun("completed");
+      yield* threads.settleIfRequested({ threadId, runId: run.id });
+      assert.isNull(yield* settledOverride);
+
+      // Only the requested run settles the thread.
+      yield* threads.settleAfterRun({ threadId, runId: run.id });
+      yield* threads.settleIfRequested({
+        threadId,
+        runId: RunId.make("runtime-layer-settle-after-run-other"),
+      });
+      assert.isNull(yield* settledOverride);
+      yield* threads.settleIfRequested({ threadId, runId: run.id });
+      assert.equal(yield* settledOverride, "settled");
+
+      // The request was consumed, so un-settling sticks.
+      yield* orchestrator.dispatch({
+        type: "thread.unsettle",
+        commandId: CommandId.make("runtime-layer-settle-after-run-unsettle"),
+        threadId,
+        reason: "user",
+      });
+      yield* threads.settleIfRequested({ threadId, runId: run.id });
+      assert.equal(yield* settledOverride, "active");
+    }),
+  );
+
   it.effect("settles past held automatic runs but not held user messages", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
