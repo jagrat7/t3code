@@ -129,6 +129,10 @@ sending an answer or restarting the agent. Settling also closes the thread's
 terminals that wait at an idle prompt, and keeps their output. A terminal that
 runs a command, such as a dev server, stays open.
 
+You can also ask the agent to settle its own thread when it finishes. It settles
+once the current turn completes. A failed or stopped turn, or a message you queue
+before the turn ends, leaves the thread active.
+
 By default, environments settle inactive threads after three days and settle
 threads whose pull request merged. A closed pull request can also settle an idle
 thread. Work in progress, pending questions or approvals, and live background work

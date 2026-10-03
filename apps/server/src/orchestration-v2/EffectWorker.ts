@@ -404,6 +404,12 @@ export const executorLayer: Layer.Layer<
                 scopeId: effect.request.scopeId,
               })
               .pipe(
+                Effect.andThen(
+                  threads.settleIfRequested({
+                    threadId: effect.threadId,
+                    runId: effect.request.runId,
+                  }),
+                ),
                 Effect.mapError(
                   (cause) =>
                     new OrchestrationEffectExecutionError({

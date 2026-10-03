@@ -300,4 +300,16 @@ export const ThreadToolkitHandlersLive = ThreadToolkit.toLayer({
       const result = yield* threads.dispatch(command).pipe(Effect.mapError(unavailable));
       return { sequence: result.sequence };
     }),
+  t3_thread_settle_after_turn: () =>
+    Effect.gen(function* () {
+      const { threads, caller } = yield* readMutationCaller();
+      const runId = caller.activeRunId;
+      if (runId === null)
+        return yield* new OrchestratorMcpFailure({
+          code: "parent_not_active",
+          message: "The calling provider no longer owns an active thread run.",
+        });
+      yield* threads.settleAfterRun({ threadId: caller.id, runId });
+      return { runId };
+    }),
 });

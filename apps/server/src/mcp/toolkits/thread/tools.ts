@@ -29,7 +29,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   description:
-    "Pin, snooze, settle, archive, or mark a thread unread in the calling project. Omit threadId for this thread. snooze requires snoozedUntil. Existing thread lifecycle rules apply; this does not schedule a future action.",
+    "Pin, snooze, settle, archive, or mark a thread unread in the calling project. Omit threadId for this thread. snooze requires snoozedUntil. Existing thread lifecycle rules apply; this does not schedule a future action. To settle this thread when your turn ends, use t3_thread_settle_after_turn.",
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     action: Schema.Literals([
@@ -56,6 +56,22 @@ const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
 })
   .annotate(Tool.Title, "Organize a thread")
   .annotate(Tool.Destructive, true);
+
+const ThreadSettleAfterTurnTool = Tool.make("t3_thread_settle_after_turn", {
+  description:
+    "Settle this thread once your current turn completes, moving it out of the active list without deleting it. Call it after finishing the requested work. A failed or stopped turn, or a message queued before the turn ends, leaves the thread active.",
+  success: Schema.Struct({ runId: RunId }),
+  failure: OrchestratorMcpFailure,
+  failureMode: "return" as const,
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+  ],
+})
+  .annotate(Tool.Title, "Settle this thread after the turn")
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true)
+  .annotate(Tool.OpenWorld, false);
 
 const queueTarget = { threadId: Schema.optional(ThreadId), queuedRunId: RunId };
 const commandTool = {
@@ -270,6 +286,7 @@ export const ThreadToolkit = Toolkit.make(
   PendingRequestReadTool,
   PendingRequestRespondTool,
   ThreadOrganizeTool,
+  ThreadSettleAfterTurnTool,
   QueueListTool,
   QueueReadTool,
   QueueEditTool,
