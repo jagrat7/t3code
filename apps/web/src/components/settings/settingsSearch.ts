@@ -403,6 +403,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["enter return command ctrl multiline prompt new line composer"],
   },
   {
+    id: "escape-to-stop",
+    title: "Escape to stop",
+    to: "/settings/general",
+    searchTerms: ["esc escape stop cancel interrupt running turn agent composer"],
+  },
+  {
     id: "follow-up-behavior",
     title: "Follow-up behavior",
     to: "/settings/general",

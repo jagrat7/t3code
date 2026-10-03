@@ -21,6 +21,9 @@ send button to use the configured follow-up behavior.
 When an active turn has queued messages, `mod+Shift+Enter` sends the first as a
 steer. Change it under **Queue: Send First Queued Message as Steer** in Keybindings.
 
+To stop the agent from the composer with Escape, turn on **Settings → General →
+Escape to stop**. If a suggestion menu is open, Escape closes the menu first.
+
 Use `mod+shift+m` to choose a model and `mod+shift+h` to choose a host.
 Use `mod+shift+e` for effort, `mod+shift+a` for access mode, `mod+shift+x` for the
 workspace, and `mod+shift+g` for the Git branch. The workspace menu includes the
