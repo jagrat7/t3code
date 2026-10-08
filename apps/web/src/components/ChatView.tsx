@@ -700,6 +700,7 @@ const PreviewPanel = lazy(() =>
 const DiffPanel = lazy(() => import("./DiffPanel"));
 const selectAutoShowFloatingPreview = (settings: { browserAutoShowFloatingPreview: boolean }) =>
   settings.browserAutoShowFloatingPreview;
+const selectSendShortcut = (settings: { sendShortcut: string }) => settings.sendShortcut;
 const DevicePanel = lazy(() =>
   import("./device/DevicePanel").then((module) => ({ default: module.DevicePanel })),
 );
@@ -4629,6 +4630,18 @@ export default function ChatView(props: ChatViewProps) {
     reportFailure: false,
   });
   const queuedRunsControlRef = useRef<QueuedRunsControlHandle>(null);
+  const sendShortcut = useClientSettings(selectSendShortcut);
+  // Plain Enter only submits at desktop widths when the send shortcut allows it,
+  // so the empty-composer steer is advertised only there.
+  const queuedSteerShortcutLabel =
+    [
+      sendShortcut !== "mod-enter" && !isMobileViewport ? "Enter in an empty composer" : null,
+      shortcutLabelForCommand(keybindings, "thread.steerQueuedMessage", {
+        context: { terminalFocus: false },
+      }),
+    ]
+      .filter((label) => label !== null)
+      .join(" or ") || null;
   const queuedEditSaveInFlightRef = useRef(false);
   const [isSavingQueuedEdit, setIsSavingQueuedEdit] = useState(false);
   const queuedEditImageResources = useMemo(
@@ -9105,7 +9118,7 @@ export default function ChatView(props: ChatViewProps) {
       // queues a follow-up and Enter again sends it into the running turn.
       if (
         expiredTerminalContextCount === 0 &&
-        submissionIntent !== "background" &&
+        submissionIntent === "foreground" &&
         !directAnnotation &&
         queuedRunsControlRef.current?.steerNext(false)
       ) {
@@ -11548,11 +11561,7 @@ export default function ChatView(props: ChatViewProps) {
                                 isServerThread && activeThread ? (
                                   <QueuedRunsControl
                                     ref={queuedRunsControlRef}
-                                    steerShortcutLabel={shortcutLabelForCommand(
-                                      keybindings,
-                                      "thread.steerQueuedMessage",
-                                      { context: { terminalFocus: false } },
-                                    )}
+                                    steerShortcutLabel={queuedSteerShortcutLabel}
                                     editShortcutLabel={shortcutLabelForCommand(
                                       keybindings,
                                       "thread.editQueuedMessage",
