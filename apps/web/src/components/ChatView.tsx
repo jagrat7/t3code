@@ -9101,6 +9101,16 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (!hasSendableContent) {
+      // Sending an empty composer steers the oldest queued message, so Enter
+      // queues a follow-up and Enter again sends it into the running turn.
+      if (
+        expiredTerminalContextCount === 0 &&
+        submissionIntent !== "background" &&
+        !directAnnotation &&
+        queuedRunsControlRef.current?.steerNext(false)
+      ) {
+        return;
+      }
       if (expiredTerminalContextCount > 0) {
         const toastCopy = buildExpiredTerminalContextToastCopy(
           expiredTerminalContextCount,

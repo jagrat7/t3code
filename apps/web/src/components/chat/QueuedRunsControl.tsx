@@ -465,7 +465,7 @@ export function QueuedRunsControl({
                           <TooltipPopup>
                             {activeRun === null
                               ? "There is no active run to steer"
-                              : `Send as a steer instead${item.serverIndex === 0 && props.steerShortcutLabel ? ` (${props.steerShortcutLabel})` : ""}`}
+                              : `Send as a steer instead${item.serverIndex === 0 ? ` (Enter in an empty composer${props.steerShortcutLabel ? ` or ${props.steerShortcutLabel}` : ""})` : ""}`}
                           </TooltipPopup>
                         </Tooltip>
                         <Tooltip>
