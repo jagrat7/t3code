@@ -39,6 +39,7 @@ import { formatShortcutLabel } from "../../keybindings";
 import { cn } from "../../lib/utils";
 import { serverEnvironment } from "../../state/server";
 import { useSettingsScope } from "./SettingsScopeContext";
+import { useScopedSettings } from "./useScopedSettings";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -301,6 +302,13 @@ function KeybindingConflictWarning({ labels }: { labels: ReadonlyArray<string> }
       {description} The most recent matching binding wins when both conditions can apply.
     </WarningTooltipIcon>
   );
+}
+
+/** Flags a bare Escape binding while the Escape to stop setting is on. */
+export function EscapeToStopConflictWarning({ labels }: { labels: ReadonlyArray<string> }) {
+  if (labels.length === 0) return null;
+  const description = `Conflicts with ${labels.join(", ")}.`;
+  return <WarningTooltipIcon label={description}>{description}</WarningTooltipIcon>;
 }
 
 function WhenVariableSelect({
@@ -1021,6 +1029,7 @@ function KeybindingHoverRowMenu(props: {
 function KeybindingSettingsRow(props: KeybindingRowProps) {
   const { row, isSaving, anchorId, allRows, variables, onSave, onReset, onRemove } = props;
   const editor = useKeybindingRowEditor({ row, allRows, onSave });
+  const escapeToStop = useScopedSettings((settings) => settings.escapeToStop);
 
   return (
     <SettingsRow
@@ -1031,6 +1040,9 @@ function KeybindingSettingsRow(props: KeybindingRowProps) {
       control={
         <div className="flex flex-wrap items-center justify-end gap-1.5">
           <KeybindingConflictWarning labels={editor.conflictLabels} />
+          <EscapeToStopConflictWarning
+            labels={escapeToStop && editor.keyDraft === "esc" ? ["Escape to stop"] : []}
+          />
           <KeybindingHoverRowMenu
             row={row}
             isSaving={isSaving}
@@ -1229,6 +1241,7 @@ function NewKeybindingCancelIcon({
 function NewKeybindingSettingsRow(props: NewKeybindingProps) {
   const { commandOptions, allRows, variables, isSaving, onSave, onCancel } = props;
   const draft = useNewKeybindingDraft({ allRows, onSave });
+  const escapeToStop = useScopedSettings((settings) => settings.escapeToStop);
 
   return (
     <SettingsRow
@@ -1248,6 +1261,9 @@ function NewKeybindingSettingsRow(props: NewKeybindingProps) {
             className="w-56"
           />
           <KeybindingConflictWarning labels={draft.conflictLabels} />
+          <EscapeToStopConflictWarning
+            labels={escapeToStop && draft.keyDraft === "esc" ? ["Escape to stop"] : []}
+          />
           <NewKeybindingKeyInput draft={draft} className="w-44" />
           <Button size="sm" disabled={isSaving || !draft.canSave} onClick={draft.save}>
             {isSaving ? "Saving" : "Save"}

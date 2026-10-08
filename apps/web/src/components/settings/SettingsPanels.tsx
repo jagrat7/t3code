@@ -83,6 +83,8 @@ import {
 } from "./useScopedSettings";
 import { useScopedModelDisabledReason } from "./useScopedModelAvailability";
 import { useSettingsScope } from "./SettingsScopeContext";
+import { EscapeToStopConflictWarning } from "./KeybindingsSettings";
+import { commandLabel, shortcutToKeybindingInput } from "./KeybindingsSettings.logic";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import { useThreadActions } from "../../hooks/useThreadActions";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
@@ -612,6 +614,9 @@ export function useSettingsRestore(onRestored?: () => void) {
         ? ["Rich text composer"]
         : []),
       ...(settings.sendShortcut !== DEFAULT_UNIFIED_SETTINGS.sendShortcut ? ["Send shortcut"] : []),
+      ...(settings.escapeToStop !== DEFAULT_UNIFIED_SETTINGS.escapeToStop
+        ? ["Escape to stop"]
+        : []),
       ...(settings.followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior
         ? ["Follow-up behavior"]
         : []),
@@ -678,6 +683,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.composerCollapseOnScroll,
       settings.composerRichTextEnabled,
       settings.sendShortcut,
+      settings.escapeToStop,
       settings.followUpBehavior,
       settings.addProjectBaseDirectory,
       settings.defaultThreadEnvMode,
@@ -800,6 +806,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       composerCollapseOnScroll: DEFAULT_UNIFIED_SETTINGS.composerCollapseOnScroll,
       composerRichTextEnabled: DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled,
       sendShortcut: DEFAULT_UNIFIED_SETTINGS.sendShortcut,
+      escapeToStop: DEFAULT_UNIFIED_SETTINGS.escapeToStop,
       followUpBehavior: DEFAULT_UNIFIED_SETTINGS.followUpBehavior,
       contextWindowMeterEnabled: DEFAULT_UNIFIED_SETTINGS.contextWindowMeterEnabled,
       environmentIdentificationMode: DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode,
@@ -2180,6 +2187,16 @@ export function GeneralSettingsPanel() {
   // needs exactly one environment.
   const environmentId = environment?.environmentId ?? null;
   const isEnvironmentScope = scope.environmentIds.length === 1 && environmentId !== null;
+  // Keybindings run before the composer, so a bare Escape binding can take Escape from Escape to stop.
+  const escapeBindingLabels = settings.escapeToStop
+    ? [
+        ...new Set(
+          (environment?.serverConfig?.keybindings ?? [])
+            .filter((binding) => shortcutToKeybindingInput(binding.shortcut) === "esc")
+            .map((binding) => commandLabel(binding.command)),
+        ),
+      ]
+    : [];
   const hasServerTargets = connectedEnvironments.length > 0;
   const [backgroundActivityDialogOpen, setBackgroundActivityDialogOpen] = useState(false);
   const mixedResponseStreamingMode = useScopedSettingsMixed(["responseStreamingMode"]);
@@ -2826,6 +2843,31 @@ export function GeneralSettingsPanel() {
                 ))}
               </SelectPopup>
             </Select>
+          }
+        />
+
+        <SettingsRow
+          {...searchableSetting("escape-to-stop")}
+          description="Press Escape in the composer to stop the running agent. An open suggestion menu closes first."
+          resetAction={
+            settings.escapeToStop !== DEFAULT_UNIFIED_SETTINGS.escapeToStop ? (
+              <SettingResetButton
+                label="escape to stop"
+                onClick={() =>
+                  updateSettings({ escapeToStop: DEFAULT_UNIFIED_SETTINGS.escapeToStop })
+                }
+              />
+            ) : null
+          }
+          control={
+            <>
+              <EscapeToStopConflictWarning labels={escapeBindingLabels} />
+              <Switch
+                checked={settings.escapeToStop}
+                onCheckedChange={(checked) => updateSettings({ escapeToStop: Boolean(checked) })}
+                aria-label="Escape to stop"
+              />
+            </>
           }
         />
 
