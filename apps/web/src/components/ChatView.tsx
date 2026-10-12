@@ -8301,6 +8301,8 @@ export default function ChatView(props: ChatViewProps) {
       if (command === "thread.stop") {
         // An unavailable command should not shadow contextual shortcuts such as Escape to close a dialog.
         if (!canInterruptRunningThread) return;
+        // A bare Escape binding still closes an open slash or mention menu first.
+        if (event.key === "Escape" && composerRef.current?.isMenuOpen()) return;
         event.preventDefault();
         event.stopPropagation();
         if (event.repeat) return;
