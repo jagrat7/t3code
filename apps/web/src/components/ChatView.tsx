@@ -707,6 +707,7 @@ const PreviewPanel = lazy(() =>
 const DiffPanel = lazy(() => import("./DiffPanel"));
 const selectAutoShowFloatingPreview = (settings: { browserAutoShowFloatingPreview: boolean }) =>
   settings.browserAutoShowFloatingPreview;
+const selectSendShortcut = (settings: { sendShortcut: string }) => settings.sendShortcut;
 const DevicePanel = lazy(() =>
   import("./device/DevicePanel").then((module) => ({ default: module.DevicePanel })),
 );
@@ -4662,6 +4663,18 @@ export default function ChatView(props: ChatViewProps) {
     reportFailure: false,
   });
   const queuedRunsControlRef = useRef<QueuedRunsControlHandle>(null);
+  const sendShortcut = useClientSettings(selectSendShortcut);
+  // Plain Enter only submits at desktop widths when the send shortcut allows it,
+  // so the empty-composer steer is advertised only there.
+  const queuedSteerShortcutLabel =
+    [
+      sendShortcut !== "mod-enter" && !isMobileViewport ? "Enter in an empty composer" : null,
+      shortcutLabelForCommand(keybindings, "thread.steerQueuedMessage", {
+        context: { terminalFocus: false },
+      }),
+    ]
+      .filter((label) => label !== null)
+      .join(" or ") || null;
   const queuedEditSaveInFlightRef = useRef(false);
   const [isSavingQueuedEdit, setIsSavingQueuedEdit] = useState(false);
   const queuedEditImageResources = useMemo(
@@ -9260,6 +9273,8 @@ export default function ChatView(props: ChatViewProps) {
             description: toastCopy.description,
           }),
         );
+      } else if (submissionIntent === "foreground" && !directAnnotation) {
+        queuedRunsControlRef.current?.steerNext(false);
       }
       return;
     }
@@ -10928,9 +10943,7 @@ export default function ChatView(props: ChatViewProps) {
       isServerThread && activeThread ? (
         <QueuedRunsControl
           ref={queuedRunsControlRef}
-          steerShortcutLabel={shortcutLabelForCommand(keybindings, "thread.steerQueuedMessage", {
-            context: { terminalFocus: false },
-          })}
+          steerShortcutLabel={queuedSteerShortcutLabel}
           editShortcutLabel={shortcutLabelForCommand(keybindings, "thread.editQueuedMessage", {
             context: { composerFocus: true },
           })}
@@ -10950,6 +10963,7 @@ export default function ChatView(props: ChatViewProps) {
       isServerThread,
       keybindings,
       optimisticUserMessages,
+      queuedSteerShortcutLabel,
     ],
   );
   // Resend once the cancelled dispatch has settled and the composer is free.
