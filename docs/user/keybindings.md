@@ -21,6 +21,9 @@ send shortcut. Click the send button to use the configured follow-up behavior.
 When an active turn has queued messages, `mod+Shift+Enter` sends the first as a
 steer. Change it under **Queue: Send First Queued Message as Steer** in Keybindings.
 
+To stop the agent from the composer with Escape, turn on **Settings → General →
+Escape to stop**. If a suggestion menu is open, Escape closes the menu first.
+
 Use `mod+shift+m` to choose a model and `mod+shift+h` to choose a host.
 To step a new thread to the next machine instead of opening the menu, bind
 **Composer: Cycle Host** in Keybindings. It has no default shortcut.
