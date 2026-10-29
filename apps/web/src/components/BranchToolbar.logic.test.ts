@@ -4,6 +4,7 @@ import { dedupeRemoteBranchesWithLocalMatches } from "@t3tools/shared/git";
 import {
   deriveLocalBranchNameFromRemoteRef,
   resolveBranchSelectionTarget,
+  resolveWorktreeBaseSelectionPath,
   resolveDraftEnvModeAfterBranchChange,
   resolveEffectiveEnvMode,
   resolveBranchToolbarPrBranch,
@@ -208,6 +209,43 @@ describe("resolveBranchSelectionTarget", () => {
       nextWorktreePath: "/repo/.t3/worktrees/feature-a",
       reuseExistingWorktree: false,
     });
+  });
+});
+
+describe("resolveWorktreeBaseSelectionPath", () => {
+  it.each([
+    {
+      name: "runs in the secondary worktree that already has the ref",
+      worktreePath: "/repo/.t3/worktrees/feature-b",
+      forceNewWorktree: false,
+      expected: "/repo/.t3/worktrees/feature-b",
+    },
+    {
+      name: "forks from a ref checked out in the main repo",
+      worktreePath: "/repo",
+      forceNewWorktree: false,
+      expected: null,
+    },
+    {
+      name: "forks from a ref with no worktree",
+      worktreePath: null,
+      forceNewWorktree: false,
+      expected: null,
+    },
+    {
+      name: "forks when every selection needs its own worktree",
+      worktreePath: "/repo/.t3/worktrees/feature-b",
+      forceNewWorktree: true,
+      expected: null,
+    },
+  ])("$name", ({ worktreePath, forceNewWorktree, expected }) => {
+    expect(
+      resolveWorktreeBaseSelectionPath({
+        activeProjectCwd: "/repo",
+        refName: { worktreePath },
+        forceNewWorktree,
+      }),
+    ).toBe(expected);
   });
 });
 

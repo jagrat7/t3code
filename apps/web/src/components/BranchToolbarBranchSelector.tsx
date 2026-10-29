@@ -53,6 +53,7 @@ import {
   resolveBranchToolbarValue,
   resolveDraftEnvModeAfterBranchChange,
   resolveEffectiveEnvMode,
+  resolveWorktreeBaseSelectionPath,
   sanitizeNewRefName,
   shouldIncludeBranchPickerItem,
 } from "./BranchToolbar.logic";
@@ -384,7 +385,10 @@ export function BranchToolbarBranchSelector({
     if (!canUpdateThreadBranch || !branchCwd || !activeProjectCwd || isBranchActionPending) return;
 
     if (isSelectingWorktreeBase) {
-      setThreadBranch(refName.name, null);
+      setThreadBranch(
+        refName.name,
+        resolveWorktreeBaseSelectionPath({ activeProjectCwd, refName, forceNewWorktree }),
+      );
       setIsBranchMenuOpen(false);
       onComposerFocusRequest?.();
       return;

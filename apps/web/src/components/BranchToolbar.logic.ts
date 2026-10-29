@@ -274,6 +274,17 @@ export function resolveBranchSelectionTarget(input: {
   };
 }
 
+// Git can't check a branch out twice, so a base ref already in a secondary worktree runs there.
+export function resolveWorktreeBaseSelectionPath(input: {
+  activeProjectCwd: string;
+  refName: Pick<VcsRef, "worktreePath">;
+  forceNewWorktree: boolean;
+}): string | null {
+  const { activeProjectCwd, refName, forceNewWorktree } = input;
+  if (forceNewWorktree || refName.worktreePath === activeProjectCwd) return null;
+  return refName.worktreePath;
+}
+
 export function shouldIncludeBranchPickerItem(input: {
   itemValue: string;
   normalizedQuery: string;
