@@ -395,7 +395,7 @@ describe("resolveSnoozePresets", () => {
       (preset) => `${preset.label} ${preset.whenLabel}`,
     );
 
-  it("lists custom presets soonest first and names the day when the label does not", () => {
+  it("lists custom presets in settings order and names the day when the label does not", () => {
     // Wednesday 20:00.
     expect(
       menu(localDate(2026, 4, 8, 20), [
@@ -404,7 +404,7 @@ describe("resolveSnoozePresets", () => {
         { kind: "after", minutes: 360 },
         { kind: "after", minutes: 180 },
       ]),
-    ).toEqual(["In 3 hours 23:00", "In 6 hours Thu 2:00", "Tomorrow 21:00", "Next week Mon 18:00"]);
+    ).toEqual(["Next week Mon 18:00", "Tomorrow 21:00", "In 6 hours Thu 2:00", "In 3 hours 23:00"]);
   });
 
   it("drops a today preset once its time passes and moves a weekday on that day to next week", () => {
@@ -428,8 +428,8 @@ describe("resolveSnoozePresets", () => {
     ];
     // Sunday 14:00.
     expect(menu(localDate(2026, 8, 30, 14), theo)).toEqual([
-      "Tomorrow 18:00",
       "Tomorrow 21:00",
+      "Tomorrow 18:00",
       "Friday 17:00",
     ]);
     // Friday 10:00: today's 17:00 is a week away.
