@@ -324,8 +324,9 @@ answer its questions.
 
 To change the choices in the snooze menu, open **Settings → Threads → Snooze options**.
 Each option is a duration, such as 3 hours, or a time on a day, such as 9:00 PM
-tomorrow. A weekday means the next one after today. Menus list the options soonest
-first and hide a today option after its time passes. Saved with **All environments**
+tomorrow. A weekday means the next one after today. Menus list the options in the
+order shown in Settings, so drag an option's handle to move it up or down. A today option
+is hidden after its time passes. Saved with **All environments**
 selected, the options apply to every connected environment, and the mobile app uses them too.
 
 Choose **Snooze → Custom…** from a thread's menu to pick a date and time in your

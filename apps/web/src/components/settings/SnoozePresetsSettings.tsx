@@ -1,4 +1,22 @@
-import { useState } from "react";
+import {
+  DndContext,
+  type DragEndEvent,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import { restrictToParentElement, restrictToVerticalAxis } from "@dnd-kit/modifiers";
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { type ReactNode, useState } from "react";
 import {
   DEFAULT_SNOOZE_PRESETS,
   MAX_SNOOZE_PRESET_MINUTES,
@@ -13,10 +31,11 @@ import {
 } from "@t3tools/client-runtime/state/thread-settled";
 import * as Equal from "effect/Equal";
 import * as Schema from "effect/Schema";
-import { PlusIcon, XIcon } from "lucide-react";
+import { GripVerticalIcon, PlusIcon, XIcon } from "lucide-react";
 
 import { useNowMinute } from "../../hooks/useNowMinute";
-import { reconcileSnoozeDraft, sortSnoozeRows } from "./SnoozePresetsSettings.logic";
+import { cn } from "../../lib/utils";
+import { reconcileSnoozeDraft } from "./SnoozePresetsSettings.logic";
 import { formatShortTimestamp } from "../../timestampFormat";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -90,16 +109,6 @@ function nextCandidate(presets: ReadonlyArray<SnoozePresetSetting>): SnoozePrese
   );
 }
 
-// Row order is only display order, so it does not make a list differ from the defaults.
-function sameSnoozePresets(
-  left: ReadonlyArray<SnoozePresetSetting>,
-  right: ReadonlyArray<SnoozePresetSetting>,
-) {
-  const ids = (presets: ReadonlyArray<SnoozePresetSetting>) =>
-    presets.map(snoozePresetId).toSorted();
-  return Equal.equals(ids(left), ids(right));
-}
-
 const isSnoozePresetDay = Schema.is(SnoozePresetDay);
 
 interface KindMemory {
@@ -119,27 +128,18 @@ function withWhen(
   return { kind: "at", day: when, time: preset.kind === "at" ? preset.time : memory.time };
 }
 
-/**
- * Edits the snooze menu's options. Rows sort by wake time like the menu, but only when focus
- * leaves the list, so a row never moves under the pointer mid-edit.
- */
+/** Edits the snooze menu's options. Menus list them in row order, which rows drag to change. */
 export function SnoozePresetsRow() {
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const saved = settings.snoozePresets;
-  const nowMinute = useNowMinute();
-  const now = new Date(`${nowMinute}Z`);
   // Edits build on a local draft, so a second edit before the first save echoes back
   // does not restore what the first one changed. Echoes of our own writes keep the draft.
-  // Row keys survive removals and sorts, so a row's in-progress field state stays with it.
-  // One state, so a sort queued in the same event as an edit applies on top of it.
-  const [rows, setRows] = useState(() =>
-    sortSnoozeRows(
-      saved,
-      saved.map((_, index) => index),
-      now,
-    ),
-  );
+  // Row keys survive removals and moves, so a row's in-progress field state stays with it.
+  const [rows, setRows] = useState<{
+    presets: ReadonlyArray<SnoozePresetSetting>;
+    keys: ReadonlyArray<number>;
+  }>(() => ({ presets: saved, keys: saved.map((_, index) => index) }));
   const { presets, keys } = rows;
   const [nextKey, setNextKey] = useState(saved.length);
   // Null forces the next render to adopt the saved value, as after a failed write.
@@ -156,7 +156,7 @@ export function SnoozePresetsRow() {
     const reconciled = reconcileSnoozeDraft(written, saved);
     if (reconciled.adopt) {
       setWritten([]);
-      setRows(sortSnoozeRows(saved, freshKeys(saved.length), now));
+      setRows({ presets: saved, keys: freshKeys(saved.length) });
     } else {
       setWritten(reconciled.pending);
     }
@@ -186,19 +186,12 @@ export function SnoozePresetsRow() {
       serverScoped
       settingKeys={["snoozePresets"]}
       {...searchableSetting("snooze-options")}
-      description="Choices in every snooze menu, listed soonest first. Weekdays mean the next one after today."
+      description="Choices in every snooze menu, in this order. Drag to reorder. Weekdays mean the next one after today."
       resetAction={
-        !mixed && sameSnoozePresets(presets, DEFAULT_SNOOZE_PRESETS) ? null : (
+        !mixed && Equal.equals(presets, DEFAULT_SNOOZE_PRESETS) ? null : (
           <SettingResetButton
             label="snooze options"
-            onClick={() => {
-              const sorted = sortSnoozeRows(
-                DEFAULT_SNOOZE_PRESETS,
-                freshKeys(DEFAULT_SNOOZE_PRESETS.length),
-                now,
-              );
-              save(sorted.presets, sorted.keys);
-            }}
+            onClick={() => save(DEFAULT_SNOOZE_PRESETS, freshKeys(DEFAULT_SNOOZE_PRESETS.length))}
           />
         )
       }
@@ -215,7 +208,9 @@ export function SnoozePresetsRow() {
           )
         }
         onAdd={() => save([...presets, nextCandidate(presets)], [...keys, ...freshKeys(1)])}
-        onSettle={() => setRows((current) => sortSnoozeRows(current.presets, current.keys, now))}
+        onMove={(from, to) =>
+          save(arrayMove([...presets], from, to), arrayMove([...keys], from, to))
+        }
       />
     </SettingsRow>
   );
@@ -228,7 +223,7 @@ function SnoozePresetList(props: {
   onChange: (index: number, preset: SnoozePresetSetting) => void;
   onRemove: (index: number) => void;
   onAdd: () => void;
-  onSettle: () => void;
+  onMove: (from: number, to: number) => void;
 }) {
   const nowMinute = useNowMinute();
   const now = new Date(`${nowMinute}Z`);
@@ -260,52 +255,58 @@ function SnoozePresetList(props: {
     repeatedLabels.has(preset.label) ? `${preset.label} ${preset.whenLabel}` : preset.label,
   );
 
+  const ids = props.keys.map(String);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+  const handleDragEnd = (event: DragEndEvent) => {
+    if (event.over === null || event.active.id === event.over.id) return;
+    props.onMove(ids.indexOf(String(event.active.id)), ids.indexOf(String(event.over.id)));
+  };
+
   return (
-    <div
-      className="flex flex-col gap-1.5 pt-3 pb-2"
-      onBlur={(event) => {
-        const list = event.currentTarget;
-        const next = event.relatedTarget;
-        if (list.contains(next)) return;
-        // Select popups portal out of the list, so focus moving into one is not leaving it.
-        if (next instanceof Element && next.closest('[data-slot="select-popup"]')) return;
-        // Waits for the amount field's blur commit, and skips its Enter blur-and-refocus.
-        queueMicrotask(() => {
-          if (!list.contains(document.activeElement)) props.onSettle();
-        });
-      }}
-    >
-      {props.presets.map((preset, index) => {
-        const preview = previews[index]!;
-        return (
-          <div
-            key={props.keys[index]}
-            role="group"
-            aria-label={`Snooze option ${index + 1}`}
-            className="flex flex-wrap items-center gap-2"
-          >
-            <SnoozePresetFields preset={preset} onChange={(next) => props.onChange(index, next)} />
-            <div className="ml-auto flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-              {preview.tone === "menu" ? (
-                <span className="truncate">
-                  <span className="text-foreground">{preview.label}</span>
-                  <span className="ps-2 tabular-nums">{preview.when}</span>
-                </span>
-              ) : (
-                <span className="truncate">{preview.text}</span>
-              )}
-              <Button
-                variant="ghost-muted"
-                size="icon-sm"
-                aria-label={`Remove snooze option ${index + 1}`}
-                onClick={() => props.onRemove(index)}
-              >
-                <XIcon />
-              </Button>
-            </div>
+    <div className="flex flex-col gap-1.5 pt-3 pb-2">
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        modifiers={[restrictToVerticalAxis, restrictToParentElement]}
+        onDragEnd={handleDragEnd}
+      >
+        <SortableContext items={ids} strategy={verticalListSortingStrategy}>
+          <div className="flex flex-col gap-1.5">
+            {props.presets.map((preset, index) => {
+              const preview = previews[index]!;
+              return (
+                <SortableSnoozePresetRow key={ids[index]} id={ids[index]!} position={index + 1}>
+                  <SnoozePresetFields
+                    preset={preset}
+                    onChange={(next) => props.onChange(index, next)}
+                  />
+                  <div className="ml-auto flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+                    {preview.tone === "menu" ? (
+                      <span className="truncate">
+                        <span className="text-foreground">{preview.label}</span>
+                        <span className="ps-2 tabular-nums">{preview.when}</span>
+                      </span>
+                    ) : (
+                      <span className="truncate">{preview.text}</span>
+                    )}
+                    <Button
+                      variant="ghost-muted"
+                      size="icon-sm"
+                      aria-label={`Remove snooze option ${index + 1}`}
+                      onClick={() => props.onRemove(index)}
+                    >
+                      <XIcon />
+                    </Button>
+                  </div>
+                </SortableSnoozePresetRow>
+              );
+            })}
           </div>
-        );
-      })}
+        </SortableContext>
+      </DndContext>
       <p className="text-xs text-muted-foreground">
         {menuOrder.length === 0 ? "Menus offer only Custom…" : `Menu now: ${menuOrder.join(" · ")}`}
       </p>
@@ -325,6 +326,42 @@ function SnoozePresetList(props: {
           </span>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function SortableSnoozePresetRow(props: { id: string; position: number; children: ReactNode }) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: props.id });
+  return (
+    <div
+      ref={setNodeRef}
+      role="group"
+      aria-label={`Snooze option ${props.position}`}
+      style={{ transform: CSS.Translate.toString(transform), transition }}
+      className={cn(
+        "flex flex-wrap items-center gap-2",
+        isDragging && "relative z-10 rounded-md bg-background shadow-md",
+      )}
+    >
+      <button
+        type="button"
+        ref={setActivatorNodeRef}
+        {...attributes}
+        {...listeners}
+        aria-label={`Reorder snooze option ${props.position}`}
+        className="-ml-1 flex size-6 shrink-0 cursor-grab touch-none items-center justify-center rounded text-muted-foreground/70 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring active:cursor-grabbing"
+      >
+        <GripVerticalIcon className="size-3.5" />
+      </button>
+      {props.children}
     </div>
   );
 }
