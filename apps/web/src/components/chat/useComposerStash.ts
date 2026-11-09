@@ -81,6 +81,7 @@ export function useComposerStash(input: {
   readonly prompt: string;
   readonly composerMenuOpen: boolean;
   readonly isComposerCollapsedMobile: boolean;
+  readonly isEditingQueuedMessage: boolean;
   readonly composerPreviewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
   readonly composerReviewComments: ReadonlyArray<ReviewCommentContext>;
   readonly composerThreadContexts: ReadonlyArray<ThreadContextRecord>;
@@ -111,6 +112,7 @@ export function useComposerStash(input: {
     prompt,
     composerMenuOpen,
     isComposerCollapsedMobile,
+    isEditingQueuedMessage,
     composerPreviewAnnotations,
     composerReviewComments,
     composerThreadContexts,
@@ -155,7 +157,21 @@ export function useComposerStash(input: {
     setStashPulseKey((key) => key + 1);
   };
 
+  // While a queued message is being edited the composer shows that edit's own draft, so
+  // stashing would park the edit while the original still runs, and restoring would merge into it.
+  const blockedByQueuedEdit = () => {
+    if (!isEditingQueuedMessage) return false;
+    toastManager.add({
+      type: "info",
+      title: "Finish editing the queued message first",
+      description: "Save or cancel the edit, then use the stash.",
+      data: { hideCopyButton: true },
+    });
+    return true;
+  };
+
   const restoreStashEntry = async (menuEntry: PromptStashEntry) => {
+    if (blockedByQueuedEdit()) return;
     const filesToVerify = menuEntry.files ?? [];
     if (filesToVerify.some((file) => file.environmentId !== environmentId)) {
       toastManager.add({
@@ -445,6 +461,7 @@ export function useComposerStash(input: {
   const deleteStashEntryStable = useStableCallback(deleteStashEntry);
 
   const stashCurrentPrompt = async () => {
+    if (blockedByQueuedEdit()) return;
     // Stashing clears the draft. A pasted attachment still downloading would then land in the
     // emptied composer instead of travelling with the entry it belongs to.
     if (pendingDraftWork.has(attachmentTargetKey)) {

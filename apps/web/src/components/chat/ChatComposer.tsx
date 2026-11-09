@@ -2371,6 +2371,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     prompt,
     composerMenuOpen,
     isComposerCollapsedMobile,
+    isEditingQueuedMessage,
     composerPreviewAnnotations,
     composerReviewComments,
     composerThreadContexts,
