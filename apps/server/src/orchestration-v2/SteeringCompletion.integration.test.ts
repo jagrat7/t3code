@@ -1122,7 +1122,6 @@ it.effect.each(
   }),
 );
 
-// A command cannot steer, so a deferred steer saved as one stays queued instead.
 it.effect.each(["edited before steering", "/context all"])(
   "a deferred steer waits for its edit, then is saved as %s",
   (savedText) =>

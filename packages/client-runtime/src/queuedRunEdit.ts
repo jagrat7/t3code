@@ -87,11 +87,7 @@ interface ExitWatch<E> {
   cancel: (() => void) | null;
 }
 
-/**
- * Asks the server to hold (true) or release (false) the queue at the edited
- * message. Failures are ignored: an older server, or a run that already
- * started, leaves the edit unheld and the exit watch recovers it.
- */
+/** Failures are ignored: an older server, or a run that already started, leaves the edit unheld. */
 export type HoldQueuedRun = (held: boolean) => void;
 
 interface EditHold {

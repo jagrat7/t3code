@@ -50,7 +50,6 @@ export function queuedRunsInDeliveryOrder(
   }
 }
 
-/** The first queued run no Stop or failure holds, whether or not it is being edited. */
 export function queueHead(
   projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
 ): OrchestrationV2Run | undefined {

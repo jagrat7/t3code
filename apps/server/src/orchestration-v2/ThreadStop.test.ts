@@ -899,8 +899,7 @@ it.effect("the queue waits at a message being edited once it is next", () =>
   }).pipe(Effect.provide(layerTest)),
 );
 
-// The run-end reaction that holds the queue has not run yet when the save lands.
-it.effect("saving an edit right after a provider failure leaves the queue held", () =>
+it.effect("saving an edit after a provider failure leaves the queue held", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
@@ -979,7 +978,6 @@ it.effect.each(["expires", "is released"] as const)(
       yield* holdForEdit(threadId, 1, `${threadId}:hold`, true);
       yield* completeRun(threadId, 0);
 
-      // A renewal halfway through keeps the hold when the first deadline comes.
       const halfHold = Duration.millis(QUEUED_RUN_EDIT_HOLD_MS / 2);
       yield* TestClock.adjust(halfHold);
       yield* holdForEdit(threadId, 1, `${threadId}:renew`, true);

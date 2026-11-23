@@ -1042,7 +1042,6 @@ function worktreeSetupPending(
   );
 }
 
-// Each can change which queued message is next, or end the edit the queue waits on.
 const QUEUE_CHANGING_COMMAND_TYPES = [
   "queue.resume",
   "queued-run.start",
@@ -2550,10 +2549,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (yield* cancelStaleQuestionWakes(projection)) {
         projection = yield* readCommandProjection(threadId);
       }
-      // An edit-held head with nothing to pass it is still read, so a failure below holds the queue.
       let storedQueuedRun =
         options?.queuedRunId === undefined
-          ? (nextQueuedRun(projection) ?? queueHead(projection))
+          ? nextQueuedRun(projection)
           : projection.runs.find(
               (run) => run.id === options.queuedRunId && run.status === "queued",
             );
@@ -2565,7 +2563,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           queuedRunCancellationEvents(projection, storedQueuedRun, yield* DateTime.now),
         );
         projection = yield* readCommandProjection(threadId);
-        storedQueuedRun = nextQueuedRun(projection) ?? queueHead(projection);
+        storedQueuedRun = nextQueuedRun(projection);
       }
       // A wake that outlived some of its pull requests tells only the current ones.
       const currentWake =
@@ -2679,9 +2677,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             })),
         );
         return wakes.length > 0;
-      }
-      if (options?.queuedRunId === undefined && storedQueuedRun.editHeldUntil !== undefined) {
-        return;
       }
       // Move queued ordinals after runs that started while they waited to preserve transcript and checkpoint order.
       // Started runs have prompts; cancelled queued messages do not.
@@ -12481,7 +12476,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
     if (!command.held) {
-      // The message may have started or been cancelled while the edit was open.
       const run = projection.runs.find((candidate) => candidate.id === command.runId);
       if (run?.status !== "queued" || run.editHeldUntil === undefined) return;
       yield* emitEvent({

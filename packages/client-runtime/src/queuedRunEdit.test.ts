@@ -64,14 +64,12 @@ describe("makeQueuedRunEditStore", () => {
       vi.advanceTimersByTime(QUEUED_RUN_EDIT_HOLD_RENEW_MS);
       expect(holds).toEqual(["run-1:hold", "run-1:hold"]);
 
-      // Switching messages releases the first; cancelling releases the second.
       const other = RunId.make("run-2");
       registry.set(runs, [...queued(), { id: other, status: "queued" }]);
       begin(other);
       store.end("env:thread");
       expect(holds.slice(2)).toEqual(["run-1:release", "run-2:hold", "run-2:release"]);
 
-      // Renewals pause during a save and resume if it fails.
       holds.length = 0;
       begin();
       const finishSave = store.startSave("env:thread");
