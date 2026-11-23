@@ -11,6 +11,7 @@ import { stripAttachmentOnlyBootstrapPrompt } from "@t3tools/shared/composerCont
 import {
   makeQueuedRunEditStore,
   resolveQueuedEditExit,
+  type HoldQueuedRun,
   type QueuedRunsAtom,
 } from "@t3tools/client-runtime/queued-run-edit";
 
@@ -113,6 +114,7 @@ export function beginQueuedRunEdit(
   threadKey: string,
   edit: QueuedRunEdit,
   runs: QueuedRunsAtom,
+  hold: HoldQueuedRun,
 ): void {
   const previous = getQueuedRunEdit(threadKey);
   if (previous !== null && previous.runId !== edit.runId) {
@@ -128,7 +130,7 @@ export function beginQueuedRunEdit(
   queuedRunEdits.begin(
     threadKey,
     { ...edit, originalText },
-    { runs, onRunLeftQueue: exitQueuedRunEdit },
+    { runs, onRunLeftQueue: exitQueuedRunEdit, hold },
   );
 }
 
