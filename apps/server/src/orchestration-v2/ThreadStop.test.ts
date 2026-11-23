@@ -12,12 +12,14 @@ import {
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
+  QUEUED_RUN_EDIT_HOLD_MS,
   RuntimeRequestId,
   ScheduledTaskId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -897,6 +899,69 @@ it.effect("the queue waits at a message being edited once it is next", () =>
   }).pipe(Effect.provide(layerTest)),
 );
 
+// The run-end reaction that holds the queue has not run yet when the save lands.
+it.effect("saving an edit right after a provider failure leaves the queue held", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:edit-hold-after-failure");
+    yield* createWatchingThread(threadId, 42);
+    yield* send(threadId, "active", "start_immediately");
+    yield* send(threadId, "edited", "queue_after_active");
+    yield* holdForEdit(threadId, 1, "edit-after-failure:hold", true);
+    const [active, edited] = (yield* orchestrator.getThreadProjection(threadId)).runs;
+    const now = yield* DateTime.now;
+    yield* projections.apply({
+      id: EventId.make("event:edit-after-failure:error"),
+      type: "turn-item.updated",
+      threadId,
+      runId: active!.id,
+      nodeId: active!.rootNodeId!,
+      occurredAt: now,
+      payload: {
+        id: TurnItemId.make("turn-item:edit-after-failure:error"),
+        type: "error",
+        threadId,
+        runId: active!.id,
+        nodeId: active!.rootNodeId,
+        providerThreadId: active!.providerThreadId,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 2,
+        status: "failed",
+        title: "Provider failure",
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        failure: {
+          class: "provider_error",
+          message: "Provider request failed with HTTP 502",
+          code: null,
+          retryable: null,
+        },
+      },
+    });
+    yield* projections.apply({
+      id: EventId.make("event:edit-after-failure:failed"),
+      type: "run.updated",
+      threadId,
+      runId: active!.id,
+      occurredAt: now,
+      payload: { ...active!, status: "failed", startedAt: now, completedAt: now },
+    });
+
+    yield* orchestrator.dispatch({
+      type: "queued-run.edit",
+      commandId: CommandId.make("edit-after-failure:save"),
+      threadId,
+      runId: edited!.id,
+      text: "edited after the failure",
+    });
+    assert.deepEqual((yield* threadState(threadId)).runs, ["failed", "queued:held"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect.each(["expires", "is released"] as const)(
   "an edit hold starts the queue when it %s",
   (ending) =>
@@ -914,10 +979,11 @@ it.effect.each(["expires", "is released"] as const)(
       yield* holdForEdit(threadId, 1, `${threadId}:hold`, true);
       yield* completeRun(threadId, 0);
 
-      // Renewing keeps the hold past the first expiry.
-      yield* TestClock.adjust("3 minutes");
+      // A renewal halfway through keeps the hold when the first deadline comes.
+      const halfHold = Duration.millis(QUEUED_RUN_EDIT_HOLD_MS / 2);
+      yield* TestClock.adjust(halfHold);
       yield* holdForEdit(threadId, 1, `${threadId}:renew`, true);
-      yield* TestClock.adjust("2 minutes");
+      yield* TestClock.adjust(halfHold);
       yield* fireDueHoldTimer;
       assert.deepEqual((yield* threadState(threadId)).runs, ["completed", "queued:editing"]);
 
@@ -925,7 +991,7 @@ it.effect.each(["expires", "is released"] as const)(
         yield* holdForEdit(threadId, 1, `${threadId}:release`, false);
         assert.deepEqual((yield* threadState(threadId)).runs, ["completed", "starting"]);
       }
-      yield* TestClock.adjust("3 minutes");
+      yield* TestClock.adjust(halfHold);
       yield* fireDueHoldTimer;
       assert.deepEqual((yield* threadState(threadId)).runs, ["completed", "starting"]);
       const timers = yield* sql<{ readonly status: string }>`

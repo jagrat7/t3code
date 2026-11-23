@@ -1,7 +1,7 @@
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
-import { queuedRunsInDeliveryOrder } from "./QueuedRunOrder.ts";
+import { nextQueuedRun, queuedRunsInDeliveryOrder } from "./QueuedRunOrder.ts";
 
 const at = (time: string) => DateTime.makeUnsafe(`2026-01-01T${time}Z`);
 const delegatedCompletion = {
@@ -61,5 +61,31 @@ describe("queued run delivery order", () => {
       "run:old",
       "run:later-completion",
     ]);
+  });
+
+  it("passes a message being edited only for a subagent result", () => {
+    const run = (key: string, time: string, extra: object = {}) => ({
+      id: `run:${key}`,
+      ordinal: 1,
+      requestedAt: at(time),
+      status: "queued",
+      userMessageId: `message:${key}`,
+      ...extra,
+    });
+    const edited = run("edited", "10:00:00", { editHeldUntil: at("10:05:00") });
+    const projection = (...runs: ReadonlyArray<object>) =>
+      ({
+        messages: [
+          { id: "message:edited" },
+          { id: "message:later" },
+          { id: "message:completion", delegatedCompletion },
+        ],
+        runs,
+      }) as never;
+
+    expect(nextQueuedRun(projection(edited, run("later", "10:01:00")))).toBeUndefined();
+    expect(nextQueuedRun(projection(edited, run("completion", "10:02:00")))?.id).toBe(
+      "run:completion",
+    );
   });
 });

@@ -203,7 +203,12 @@ import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
 import { ProviderSwitchServiceV2 } from "./ProviderSwitchService.ts";
-import { isAutomaticCompletionRun, queuedRunsInDeliveryOrder } from "./QueuedRunOrder.ts";
+import {
+  isAutomaticCompletionRun,
+  nextQueuedRun,
+  queueHead,
+  queuedRunsInDeliveryOrder,
+} from "./QueuedRunOrder.ts";
 import { isRuntimePolicyAboveCeilingError, RuntimePolicyV2 } from "./RuntimePolicy.ts";
 import {
   endOrphanedNativeSubagent,
@@ -1037,19 +1042,6 @@ function worktreeSetupPending(
   );
 }
 
-function queueHead(
-  projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
-): OrchestrationV2Run | undefined {
-  return queuedRunsInDeliveryOrder(projection).find((run) => run.queueHeld !== true);
-}
-
-function nextQueuedRun(
-  projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
-): OrchestrationV2Run | undefined {
-  const head = queueHead(projection);
-  return head?.editHeldUntil === undefined ? head : undefined;
-}
-
 // Each can change which queued message is next, or end the edit the queue waits on.
 const QUEUE_CHANGING_COMMAND_TYPES = [
   "queue.resume",
@@ -1068,6 +1060,13 @@ function startsQueueAfterCommit(
   { readonly type: (typeof QUEUE_CHANGING_COMMAND_TYPES)[number] }
 > {
   return (QUEUE_CHANGING_COMMAND_TYPES as ReadonlyArray<string>).includes(command.type);
+}
+
+// Only Resume and Send now are a person choosing to go on; the rest still honor a turn that just failed.
+function queueStartAfterCommit(command: OrchestrationV2ServerCommand) {
+  if (command.type === "queued-run.start") return { userStarted: true, queuedRunId: command.runId };
+  if (command.type === "queue.resume") return { userStarted: true };
+  return startsQueueAfterCommit(command) ? { latestRunEnded: true } : {};
 }
 
 function withoutEditHold(run: OrchestrationV2Run): OrchestrationV2Run {
@@ -2551,10 +2550,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (yield* cancelStaleQuestionWakes(projection)) {
         projection = yield* readCommandProjection(threadId);
       }
-      // The head is read past an edit hold so a failure below still holds the queue.
+      // An edit-held head with nothing to pass it is still read, so a failure below holds the queue.
       let storedQueuedRun =
         options?.queuedRunId === undefined
-          ? queueHead(projection)
+          ? (nextQueuedRun(projection) ?? queueHead(projection))
           : projection.runs.find(
               (run) => run.id === options.queuedRunId && run.status === "queued",
             );
@@ -2566,7 +2565,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           queuedRunCancellationEvents(projection, storedQueuedRun, yield* DateTime.now),
         );
         projection = yield* readCommandProjection(threadId);
-        storedQueuedRun = queueHead(projection);
+        storedQueuedRun = nextQueuedRun(projection) ?? queueHead(projection);
       }
       // A wake that outlived some of its pull requests tells only the current ones.
       const currentWake =
@@ -12414,14 +12413,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     // A command cannot steer, so an edit into one keeps it queued where it is.
-    if (
+    const losesSteer =
       queuedRun.steerWhenReadyRunId !== undefined &&
       isSlashCommand({
         text: command.text,
         attachments: command.attachments ?? queuedMessage.attachments,
-      })
-    ) {
-      const { steerWhenReadyRunId: _, ...queued } = queuedRun;
+      });
+    if (losesSteer || queuedRun.editHeldUntil !== undefined) {
+      const { steerWhenReadyRunId, ...unsteered } = withoutEditHold(queuedRun);
       yield* emitEvent({
         type: "run.updated",
         threadId: command.threadId,
@@ -12429,7 +12428,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(queuedRun.rootNodeId === null ? {} : { nodeId: queuedRun.rootNodeId }),
         providerInstanceId: queuedRun.providerInstanceId,
         occurredAt: now,
-        payload: queued,
+        payload:
+          losesSteer || steerWhenReadyRunId === undefined
+            ? unsteered
+            : { ...unsteered, steerWhenReadyRunId },
       });
     }
     // Thread deletion only cleans files the thread still references.
@@ -12453,16 +12455,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           },
         } satisfies PendingOrchestrationEffectV2,
       ]);
-    }
-    if (queuedRun.editHeldUntil !== undefined) {
-      yield* emitEvent({
-        type: "run.updated",
-        threadId: command.threadId,
-        runId: queuedRun.id,
-        providerInstanceId: queuedRun.providerInstanceId,
-        occurredAt: now,
-        payload: withoutEditHold(queuedRun),
-      });
     }
   });
 
@@ -16295,10 +16287,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
     if (startsQueueAfterCommit(command)) {
       yield* mapDispatchError(command)(
-        startNextQueuedRun(command.threadId, {
-          userStarted: command.type === "queue.resume" || command.type === "queued-run.start",
-          ...(command.type === "queued-run.start" ? { queuedRunId: command.runId } : {}),
-        }),
+        startNextQueuedRun(command.threadId, queueStartAfterCommit(command)),
       );
     }
     return {
@@ -16582,10 +16571,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       (command.type === "thread.runtime-mode.set" && runtimeModeCeiling !== undefined)
     ) {
       yield* mapDispatchError(command)(
-        startNextQueuedRun(command.threadId, {
-          userStarted: command.type === "queue.resume" || command.type === "queued-run.start",
-          ...(command.type === "queued-run.start" ? { queuedRunId: command.runId } : {}),
-        }),
+        startNextQueuedRun(command.threadId, queueStartAfterCommit(command)),
       );
     }
     if (

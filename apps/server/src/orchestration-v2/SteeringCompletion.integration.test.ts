@@ -1122,107 +1122,118 @@ it.effect.each(
   }),
 );
 
-it.effect("a deferred steer waits for its edit and then steers the edited text", () =>
-  Effect.gen(function* () {
-    const { steered, layer, startFirstTurn, events } = yield* nextTurnSelectionHarness(
-      "deferred-steer-edit-hold",
-    );
-    yield* Effect.gen(function* () {
-      const orchestrator = yield* Orchestrator.OrchestratorV2;
-      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-      const sink = yield* EventSink.EventSinkV2;
-      const threadId = yield* startFirstTurn;
-      const before = yield* orchestrator.getThreadProjection(threadId);
-      const run = before.runs[0]!;
-      const turn = before.providerTurns[0]!;
-      const now = yield* DateTime.now;
-      yield* sink.write({
-        events: [
-          {
-            id: EventId.make("setup-run"),
-            type: "run.updated",
-            threadId,
-            occurredAt: now,
-            payload: { ...run, status: "preparing" },
-          },
-          {
-            id: EventId.make("setup-turn"),
-            type: "provider-turn.updated",
-            threadId,
-            occurredAt: now,
-            payload: { ...turn, status: "pending" },
-          },
-        ],
-      });
-      const steerAfterSetup = (text: string) =>
-        Effect.gen(function* () {
-          yield* orchestrator.dispatch({
-            type: "message.dispatch",
-            commandId: CommandId.make(text),
-            threadId,
-            messageId: MessageId.make(`message:${text}`),
-            text,
-            attachments: [],
-            deliveryIntent: "steer",
-            dispatchMode: { type: "queue_after_active" },
-            createdBy: "user",
-            creationSource: "web",
-          });
-          return (yield* orchestrator.getThreadProjection(threadId)).runs.find(
-            (candidate) => candidate.userMessageId === MessageId.make(`message:${text}`),
-          )!;
-        });
-      const edited = yield* steerAfterSetup("being edited");
-      const other = yield* steerAfterSetup("not edited");
-      yield* orchestrator.dispatch({
-        type: "queued-run.hold",
-        commandId: CommandId.make("hold-steer"),
-        threadId,
-        runId: edited.id,
-        held: true,
-      });
-      const otherPromoted = yield* orchestrator.streamDomainEvents.pipe(
-        Stream.filter(
-          (event) =>
-            event.type === "run.updated" &&
-            event.payload.id === other.id &&
-            event.payload.status === "cancelled",
-        ),
-        Stream.take(1),
-        Stream.runDrain,
-        Effect.forkScoped,
+// A command cannot steer, so a deferred steer saved as one stays queued instead.
+it.effect.each(["edited before steering", "/context all"])(
+  "a deferred steer waits for its edit, then is saved as %s",
+  (savedText) =>
+    Effect.gen(function* () {
+      const { steered, layer, startFirstTurn, events } = yield* nextTurnSelectionHarness(
+        `deferred-steer-edit-hold-${savedText.startsWith("/") ? "command" : "text"}`,
       );
-      yield* worker.drain();
-      yield* sink.write({
-        events: [
-          {
-            id: EventId.make("ready-run"),
-            type: "run.updated",
-            threadId,
-            occurredAt: now,
-            payload: run,
-          },
-        ],
-      });
-      yield* Queue.offer(events, { type: "provider_turn.updated", driver, providerTurn: turn });
-      // Both steers wait on this turn, so the later one landing means the held one was passed over.
-      yield* Fiber.join(otherPromoted);
-      yield* worker.drain();
-      assert.deepEqual(steered, ["not edited"]);
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const threadId = yield* startFirstTurn;
+        const before = yield* orchestrator.getThreadProjection(threadId);
+        const run = before.runs[0]!;
+        const turn = before.providerTurns[0]!;
+        const now = yield* DateTime.now;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("setup-run"),
+              type: "run.updated",
+              threadId,
+              occurredAt: now,
+              payload: { ...run, status: "preparing" },
+            },
+            {
+              id: EventId.make("setup-turn"),
+              type: "provider-turn.updated",
+              threadId,
+              occurredAt: now,
+              payload: { ...turn, status: "pending" },
+            },
+          ],
+        });
+        const steerAfterSetup = (text: string) =>
+          Effect.gen(function* () {
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(text),
+              threadId,
+              messageId: MessageId.make(`message:${text}`),
+              text,
+              attachments: [],
+              deliveryIntent: "steer",
+              dispatchMode: { type: "queue_after_active" },
+              createdBy: "user",
+              creationSource: "web",
+            });
+            return (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+              (candidate) => candidate.userMessageId === MessageId.make(`message:${text}`),
+            )!;
+          });
+        const edited = yield* steerAfterSetup("being edited");
+        const other = yield* steerAfterSetup("not edited");
+        yield* orchestrator.dispatch({
+          type: "queued-run.hold",
+          commandId: CommandId.make("hold-steer"),
+          threadId,
+          runId: edited.id,
+          held: true,
+        });
+        const otherPromoted = yield* orchestrator.streamDomainEvents.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "run.updated" &&
+              event.payload.id === other.id &&
+              event.payload.status === "cancelled",
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+        yield* worker.drain();
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("ready-run"),
+              type: "run.updated",
+              threadId,
+              occurredAt: now,
+              payload: run,
+            },
+          ],
+        });
+        yield* Queue.offer(events, { type: "provider_turn.updated", driver, providerTurn: turn });
+        // Both steers wait on this turn, so the later one landing means the held one was passed over.
+        yield* Fiber.join(otherPromoted);
+        yield* worker.drain();
+        assert.deepEqual(steered, ["not edited"]);
 
-      yield* orchestrator.dispatch({
-        type: "queued-run.edit",
-        commandId: CommandId.make("save-steer"),
-        threadId,
-        runId: edited.id,
-        text: "edited before steering",
-      });
-      yield* worker.drain();
-      assert.deepEqual(steered, ["not edited", "edited before steering"]);
-      const after = yield* orchestrator.getThreadProjection(threadId);
-      assert.equal(after.runs.find((candidate) => candidate.id === edited.id)?.status, "cancelled");
-    }).pipe(Effect.provide(layer));
-  }),
+        yield* orchestrator.dispatch({
+          type: "queued-run.edit",
+          commandId: CommandId.make("save-steer"),
+          threadId,
+          runId: edited.id,
+          text: savedText,
+        });
+        yield* worker.drain();
+        const saved = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+          (candidate) => candidate.id === edited.id,
+        );
+        if (savedText.startsWith("/")) {
+          assert.deepEqual(steered, ["not edited"]);
+          assert.equal(saved?.status, "queued");
+          assert.isUndefined(saved?.steerWhenReadyRunId);
+        } else {
+          assert.deepEqual(steered, ["not edited", savedText]);
+          assert.equal(saved?.status, "cancelled");
+        }
+      }).pipe(Effect.provide(layer));
+    }),
 );
 
 it.effect("force sends multiple queued messages and can force send a requeued message again", () =>

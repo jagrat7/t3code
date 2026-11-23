@@ -49,3 +49,20 @@ export function queuedRunsInDeliveryOrder(
     }
   }
 }
+
+/** The first queued run no Stop or failure holds, whether or not it is being edited. */
+export function queueHead(
+  projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
+): OrchestrationV2Run | undefined {
+  return queuedRunsInDeliveryOrder(projection).find((run) => run.queueHeld !== true);
+}
+
+/** The run to start next. An edit holds the queue at its message, but subagent results still go out. */
+export function nextQueuedRun(
+  projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
+): OrchestrationV2Run | undefined {
+  const unheld = queuedRunsInDeliveryOrder(projection).filter((run) => run.queueHeld !== true);
+  const head = unheld[0];
+  if (head?.editHeldUntil === undefined) return head;
+  return unheld.find((run) => isAutomaticCompletionRun(projection, run));
+}
