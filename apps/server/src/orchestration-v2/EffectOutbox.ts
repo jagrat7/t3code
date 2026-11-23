@@ -146,6 +146,12 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
 ]);
 export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.Type;
 
+// These wait only on their own kind, so one due in minutes cannot hold back a thread's turns.
+const OWN_LANE_EFFECT_TYPES = [
+  "thread-title.generate",
+  "queued-run.hold.expire",
+] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
+
 export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
   "provider-runtime.continue",
   "provider-session.detach",
@@ -347,7 +353,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       ).pipe(Effect.asVoid);
     const effectLane = (alias: "candidate" | "active") =>
       sql.literal(
-        `CASE WHEN ${alias}.effect_type IN ('thread-title.generate', 'queued-run.hold.expire') THEN ${alias}.effect_type ELSE '' END`,
+        `CASE WHEN ${alias}.effect_type IN (${OWN_LANE_EFFECT_TYPES.map((type) => `'${type}'`).join(", ")}) THEN ${alias}.effect_type ELSE '' END`,
       );
     // Retry backoff must block later effects so turns cannot race a pending rollback.
     const claimableCandidatePredicate = (
@@ -378,8 +384,6 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
                 }
               )
             )
-            -- Titles and edit-hold timers wait only on their own kind: a timer due in
-            -- minutes would otherwise hold back the thread's turns until it fires.
             AND ${effectLane("candidate")} = ${effectLane("active")}
         )
         AND ${
