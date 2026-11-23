@@ -97,7 +97,7 @@ export type HoldQueuedRun = (held: boolean) => void;
 interface EditHold {
   readonly runId: RunId;
   readonly hold: HoldQueuedRun;
-  readonly renew: ReturnType<typeof setInterval>;
+  renew: ReturnType<typeof setInterval> | null;
 }
 
 /**
@@ -133,11 +133,19 @@ export function makeQueuedRunEditStore<E extends { readonly runId: RunId }>(opti
     });
   };
 
+  // A renewal sent during a save would run after it and hold the saved message again.
+  const pauseHold = (threadKey: string) => {
+    const current = holds.get(threadKey);
+    if (current?.renew == null) return;
+    clearInterval(current.renew);
+    current.renew = null;
+  };
+
   // The server drops the hold itself once the run starts or a save lands.
   const stopHold = (threadKey: string, release: boolean) => {
     const current = holds.get(threadKey);
     if (current === undefined) return;
-    clearInterval(current.renew);
+    if (current.renew !== null) clearInterval(current.renew);
     holds.delete(threadKey);
     if (release) current.hold(false);
   };
@@ -243,6 +251,7 @@ export function makeQueuedRunEditStore<E extends { readonly runId: RunId }>(opti
       if (watch === undefined || threadKey in registry.get(savingAtom)) return null;
       setSaving(threadKey, true);
       unsubscribe(watch);
+      pauseHold(threadKey);
       let settled = false;
       return (succeeded) => {
         if (!settled) {
@@ -256,6 +265,8 @@ export function makeQueuedRunEditStore<E extends { readonly runId: RunId }>(opti
           write(threadKey, null);
           return true;
         }
+        const paused = holds.get(threadKey);
+        if (paused !== undefined) startHold(threadKey, paused.runId, paused.hold);
         subscribe(threadKey, watch);
         return watches.get(threadKey) === watch;
       };

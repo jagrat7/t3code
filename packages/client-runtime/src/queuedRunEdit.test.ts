@@ -71,14 +71,21 @@ describe("makeQueuedRunEditStore", () => {
       store.end("env:thread");
       expect(holds.slice(2)).toEqual(["run-1:release", "run-2:hold", "run-2:release"]);
 
-      // A save or a started run already ended the hold on the server.
+      // Renewals pause during a save and resume if it fails.
       holds.length = 0;
       begin();
+      const finishSave = store.startSave("env:thread");
+      vi.advanceTimersByTime(QUEUED_RUN_EDIT_HOLD_RENEW_MS * 2);
+      finishSave?.(false);
+      expect(holds).toEqual(["run-1:hold", "run-1:hold"]);
+
+      // A save or a started run already ended the hold on the server.
+      holds.length = 0;
       store.startSave("env:thread")?.(true);
       begin();
       registry.set(runs, []);
       vi.advanceTimersByTime(QUEUED_RUN_EDIT_HOLD_RENEW_MS * 2);
-      expect(holds).toEqual(["run-1:hold", "run-1:hold"]);
+      expect(holds).toEqual(["run-1:hold"]);
     } finally {
       vi.useRealTimers();
     }
