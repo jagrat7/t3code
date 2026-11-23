@@ -2776,7 +2776,20 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       const providerEffectId = "effect:foundation-title-effect-lane:b-provider";
       const nextTitleEffectId = "effect:foundation-title-effect-lane:c-title";
       const nextCriticalEffectId = "effect:foundation-title-effect-lane:d-critical";
+      // An edit-hold timer due in minutes must not hold back either lane.
+      const heldUntil = DateTime.add(yield* DateTime.now, { minutes: 5 });
       yield* outbox.enqueue([
+        {
+          id: "effect:foundation-title-effect-lane:0-edit-hold",
+          commandId,
+          threadId,
+          request: {
+            type: "queued-run.hold.expire",
+            runId: RunId.make("run:foundation-title-effect-lane"),
+            heldUntil,
+          },
+          availableAt: heldUntil,
+        },
         {
           id: titleEffectId,
           commandId,
@@ -2864,6 +2877,11 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           workerId: "title-lane-worker",
         });
       }
+      yield* outbox.cancelUnsettled({
+        threadId,
+        effectTypes: ["queued-run.hold.expire"],
+        reason: "Test cleanup.",
+      });
     }),
   );
 

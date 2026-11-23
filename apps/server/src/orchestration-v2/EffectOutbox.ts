@@ -138,6 +138,11 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     type: Schema.Literal("delegated-tasks.stop"),
     reason: Schema.optional(Schema.String),
   }),
+  Schema.Struct({
+    type: Schema.Literal("queued-run.hold.expire"),
+    runId: RunId,
+    heldUntil: Schema.DateTimeUtcFromString,
+  }),
 ]);
 export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.Type;
 
@@ -152,6 +157,7 @@ export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
   "attachment.cleanup",
   "thread-title.generate",
   "delegated-tasks.stop",
+  "queued-run.hold.expire",
 ] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
 
 export const PROCESS_BOUND_EFFECT_TYPES = [
@@ -339,6 +345,10 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
         available,
         Array.from({ length: Math.min(64, Math.max(0, Math.floor(count))) }, () => undefined),
       ).pipe(Effect.asVoid);
+    const effectLane = (alias: "candidate" | "active") =>
+      sql.literal(
+        `CASE WHEN ${alias}.effect_type IN ('thread-title.generate', 'queued-run.hold.expire') THEN ${alias}.effect_type ELSE '' END`,
+      );
     // Retry backoff must block later effects so turns cannot race a pending rollback.
     const claimableCandidatePredicate = (
       availableBefore?: string,
@@ -368,17 +378,9 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
                 }
               )
             )
-            AND (
-              (
-                candidate.effect_type = 'thread-title.generate'
-                AND active.effect_type = 'thread-title.generate'
-              )
-              OR
-              (
-                candidate.effect_type != 'thread-title.generate'
-                AND active.effect_type != 'thread-title.generate'
-              )
-            )
+            -- Titles and edit-hold timers wait only on their own kind: a timer due in
+            -- minutes would otherwise hold back the thread's turns until it fires.
+            AND ${effectLane("candidate")} = ${effectLane("active")}
         )
         AND ${
           maxRunningTitleGenerations === undefined

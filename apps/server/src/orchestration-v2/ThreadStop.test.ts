@@ -158,7 +158,10 @@ const threadState = (threadId: ThreadId) =>
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const projection = yield* orchestrator.getThreadProjection(threadId);
     return {
-      runs: projection.runs.map((run) => `${run.status}${run.queueHeld === true ? ":held" : ""}`),
+      runs: projection.runs.map(
+        (run) =>
+          `${run.status}${run.queueHeld === true ? ":held" : ""}${run.editHeldUntil === undefined ? "" : ":editing"}`,
+      ),
       watched: (projection.thread.pullRequests ?? [])
         .filter((link) => link.watch !== undefined)
         .map((link) => link.number),
@@ -798,6 +801,141 @@ it.effect("a message the user sends after Stop releases the held queue; an agent
       "queued",
     ]);
   }).pipe(Effect.provide(layerTest)),
+);
+
+const completeRun = (threadId: ThreadId, index: number) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs[index]!;
+    const now = yield* DateTime.now;
+    yield* projections.apply({
+      id: EventId.make(`event:${run.id}:completed`),
+      type: "run.updated",
+      threadId,
+      runId: run.id,
+      occurredAt: now,
+      payload: { ...run, status: "completed", completedAt: now },
+    });
+    yield* orchestrator.resumeQueuedRuns;
+  });
+
+const holdForEdit = (threadId: ThreadId, runIndex: number, commandId: string, held: boolean) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs[runIndex]!;
+    yield* orchestrator.dispatch({
+      type: "queued-run.hold",
+      commandId: CommandId.make(commandId),
+      threadId,
+      runId: run.id,
+      held,
+    });
+  });
+
+it.effect("the queue waits at a message being edited once it is next", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threadId = ThreadId.make("thread:edit-hold");
+    yield* createWatchingThread(threadId, 40);
+    yield* send(threadId, "active", "start_immediately");
+    yield* send(threadId, "ahead", "queue_after_active");
+    yield* send(threadId, "edited", "queue_after_active");
+    yield* holdForEdit(threadId, 2, "hold-edited", true);
+
+    yield* completeRun(threadId, 0);
+    assert.deepEqual((yield* threadState(threadId)).runs, [
+      "completed",
+      "starting",
+      "queued:editing",
+    ]);
+
+    // Anything sent while the queue waits, even to an idle thread, waits behind the edit.
+    yield* completeRun(threadId, 1);
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("edit-hold:agent-send"),
+      threadId,
+      messageId: MessageId.make(`message:${threadId}:agent`),
+      text: "agent nudge",
+      attachments: [],
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "agent",
+      creationSource: "mcp",
+    });
+    yield* orchestrator.dispatch({
+      type: "queue.resume",
+      commandId: CommandId.make("edit-hold:resume"),
+      threadId,
+    });
+    assert.deepEqual((yield* threadState(threadId)).runs, [
+      "completed",
+      "completed",
+      "queued:editing",
+      "queued",
+    ]);
+
+    const edited = (yield* orchestrator.getThreadProjection(threadId)).runs[2]!;
+    yield* orchestrator.dispatch({
+      type: "queued-run.edit",
+      commandId: CommandId.make("edit-hold:save"),
+      threadId,
+      runId: edited.id,
+      text: "edited and saved",
+    });
+    const saved = yield* orchestrator.getThreadProjection(threadId);
+    assert.deepEqual((yield* threadState(threadId)).runs, [
+      "completed",
+      "completed",
+      "starting",
+      "queued",
+    ]);
+    assert.equal(
+      saved.messages.find((message) => message.id === edited.userMessageId)?.text,
+      "edited and saved",
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each(["expires", "is released"] as const)(
+  "an edit hold starts the queue when it %s",
+  (ending) =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make(`thread:edit-hold-${ending.replaceAll(" ", "-")}`);
+      const sql = yield* SqlClient.SqlClient;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const fireDueHoldTimer = Effect.gen(function* () {
+        yield* sql`DELETE FROM orchestration_v2_effect_outbox WHERE effect_type != 'queued-run.hold.expire'`;
+        yield* worker.drain(1);
+      });
+      yield* createWatchingThread(threadId, 41);
+      yield* send(threadId, "active", "start_immediately");
+      yield* send(threadId, "edited", "queue_after_active");
+      yield* holdForEdit(threadId, 1, `${threadId}:hold`, true);
+      yield* completeRun(threadId, 0);
+
+      // Renewing keeps the hold past the first expiry.
+      yield* TestClock.adjust("3 minutes");
+      yield* holdForEdit(threadId, 1, `${threadId}:renew`, true);
+      yield* TestClock.adjust("2 minutes");
+      yield* fireDueHoldTimer;
+      assert.deepEqual((yield* threadState(threadId)).runs, ["completed", "queued:editing"]);
+
+      if (ending === "is released") {
+        yield* holdForEdit(threadId, 1, `${threadId}:release`, false);
+        assert.deepEqual((yield* threadState(threadId)).runs, ["completed", "starting"]);
+      }
+      yield* TestClock.adjust("3 minutes");
+      yield* fireDueHoldTimer;
+      assert.deepEqual((yield* threadState(threadId)).runs, ["completed", "starting"]);
+      const timers = yield* sql<{ readonly status: string }>`
+        SELECT status FROM orchestration_v2_effect_outbox
+        WHERE effect_type = 'queued-run.hold.expire' ORDER BY available_at`;
+      assert.deepEqual(
+        timers.map((timer) => timer.status),
+        ["succeeded", "succeeded"],
+      );
+    }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect(
