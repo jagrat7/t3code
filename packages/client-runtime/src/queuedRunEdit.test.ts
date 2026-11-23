@@ -1,6 +1,6 @@
-import { RunId } from "@t3tools/contracts";
+import { QUEUED_RUN_EDIT_HOLD_RENEW_MS, RunId } from "@t3tools/contracts";
 import { Atom, AtomRegistry } from "effect/reactivity";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   makeQueuedRunEditStore,
@@ -21,13 +21,18 @@ function setup(initialRuns: ReadonlyArray<QueuedRunStatus> | null = queued()) {
     label: "test-queued-run-edits",
   });
   const exits: Array<{ threadKey: string; text: string }> = [];
-  const begin = () =>
+  const holds: Array<string> = [];
+  const begin = (runId = RUN) =>
     store.begin(
       "env:thread",
-      { runId: RUN, text: "draft" },
-      { runs, onRunLeftQueue: (threadKey, edit) => exits.push({ threadKey, text: edit.text }) },
+      { runId, text: "draft" },
+      {
+        runs,
+        onRunLeftQueue: (threadKey, edit) => exits.push({ threadKey, text: edit.text }),
+        hold: (held) => holds.push(`${runId}:${held ? "hold" : "release"}`),
+      },
     );
-  return { registry, runs, store, exits, begin };
+  return { registry, runs, store, exits, holds, begin };
 }
 
 describe("resolveQueuedEditExit", () => {
@@ -51,6 +56,39 @@ describe("queuedRunEditBlockedReason", () => {
 });
 
 describe("makeQueuedRunEditStore", () => {
+  it("holds the queue while editing and releases it only when the edit is abandoned", () => {
+    vi.useFakeTimers();
+    try {
+      const { registry, runs, store, holds, begin } = setup();
+      begin();
+      vi.advanceTimersByTime(QUEUED_RUN_EDIT_HOLD_RENEW_MS);
+      expect(holds).toEqual(["run-1:hold", "run-1:hold"]);
+
+      const other = RunId.make("run-2");
+      registry.set(runs, [...queued(), { id: other, status: "queued" }]);
+      begin(other);
+      store.end("env:thread");
+      expect(holds.slice(2)).toEqual(["run-1:release", "run-2:hold", "run-2:release"]);
+
+      holds.length = 0;
+      begin();
+      const finishSave = store.startSave("env:thread");
+      vi.advanceTimersByTime(QUEUED_RUN_EDIT_HOLD_RENEW_MS * 2);
+      finishSave?.(false);
+      expect(holds).toEqual(["run-1:hold", "run-1:hold"]);
+
+      // A save or a started run already ended the hold on the server.
+      holds.length = 0;
+      store.startSave("env:thread")?.(true);
+      begin();
+      registry.set(runs, []);
+      vi.advanceTimersByTime(QUEUED_RUN_EDIT_HOLD_RENEW_MS * 2);
+      expect(holds).toEqual(["run-1:hold"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("fires once when the edited run leaves the queue, with the latest edit", () => {
     const { registry, runs, store, exits, begin } = setup();
     begin();
@@ -189,7 +227,7 @@ describe("makeQueuedRunEditStore", () => {
       label: "test-queued-run-edits",
     });
     const begin = () =>
-      store.begin("env:thread", { runId: RUN }, { runs, onRunLeftQueue: () => {} });
+      store.begin("env:thread", { runId: RUN }, { runs, onRunLeftQueue: () => {}, hold: () => {} });
 
     begin();
     expect(mounted).toBe(1);
@@ -241,7 +279,11 @@ describe("makeQueuedRunsAtom", () => {
       label: "test-queued-run-edits",
     });
     const exits: Array<string> = [];
-    store.begin("env:thread", { runId: RUN }, { runs, onRunLeftQueue: (key) => exits.push(key) });
+    store.begin(
+      "env:thread",
+      { runId: RUN },
+      { runs, onRunLeftQueue: (key) => exits.push(key), hold: () => {} },
+    );
     return {
       registry,
       snapshot,

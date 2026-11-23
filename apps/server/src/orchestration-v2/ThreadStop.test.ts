@@ -12,12 +12,14 @@ import {
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
+  QUEUED_RUN_EDIT_HOLD_MS,
   RuntimeRequestId,
   ScheduledTaskId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -158,7 +160,10 @@ const threadState = (threadId: ThreadId) =>
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const projection = yield* orchestrator.getThreadProjection(threadId);
     return {
-      runs: projection.runs.map((run) => `${run.status}${run.queueHeld === true ? ":held" : ""}`),
+      runs: projection.runs.map(
+        (run) =>
+          `${run.status}${run.queueHeld === true ? ":held" : ""}${run.editHeldUntil === undefined ? "" : ":editing"}`,
+      ),
       watched: (projection.thread.pullRequests ?? [])
         .filter((link) => link.watch !== undefined)
         .map((link) => link.number),
@@ -798,6 +803,203 @@ it.effect("a message the user sends after Stop releases the held queue; an agent
       "queued",
     ]);
   }).pipe(Effect.provide(layerTest)),
+);
+
+const completeRun = (threadId: ThreadId, index: number) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs[index]!;
+    const now = yield* DateTime.now;
+    yield* projections.apply({
+      id: EventId.make(`event:${run.id}:completed`),
+      type: "run.updated",
+      threadId,
+      runId: run.id,
+      occurredAt: now,
+      payload: { ...run, status: "completed", completedAt: now },
+    });
+    yield* orchestrator.resumeQueuedRuns;
+  });
+
+const holdForEdit = (threadId: ThreadId, runIndex: number, commandId: string, held: boolean) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs[runIndex]!;
+    yield* orchestrator.dispatch({
+      type: "queued-run.hold",
+      commandId: CommandId.make(commandId),
+      threadId,
+      runId: run.id,
+      held,
+    });
+  });
+
+it.effect("the queue waits at a message being edited once it is next", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threadId = ThreadId.make("thread:edit-hold");
+    yield* createWatchingThread(threadId, 40);
+    yield* send(threadId, "active", "start_immediately");
+    yield* send(threadId, "ahead", "queue_after_active");
+    yield* send(threadId, "edited", "queue_after_active");
+    yield* holdForEdit(threadId, 2, "hold-edited", true);
+
+    yield* completeRun(threadId, 0);
+    assert.deepEqual((yield* threadState(threadId)).runs, [
+      "completed",
+      "starting",
+      "queued:editing",
+    ]);
+
+    // Anything sent while the queue waits, even to an idle thread, waits behind the edit.
+    yield* completeRun(threadId, 1);
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("edit-hold:agent-send"),
+      threadId,
+      messageId: MessageId.make(`message:${threadId}:agent`),
+      text: "agent nudge",
+      attachments: [],
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "agent",
+      creationSource: "mcp",
+    });
+    yield* orchestrator.dispatch({
+      type: "queue.resume",
+      commandId: CommandId.make("edit-hold:resume"),
+      threadId,
+    });
+    assert.deepEqual((yield* threadState(threadId)).runs, [
+      "completed",
+      "completed",
+      "queued:editing",
+      "queued",
+    ]);
+
+    const edited = (yield* orchestrator.getThreadProjection(threadId)).runs[2]!;
+    yield* orchestrator.dispatch({
+      type: "queued-run.edit",
+      commandId: CommandId.make("edit-hold:save"),
+      threadId,
+      runId: edited.id,
+      text: "edited and saved",
+    });
+    const saved = yield* orchestrator.getThreadProjection(threadId);
+    assert.deepEqual((yield* threadState(threadId)).runs, [
+      "completed",
+      "completed",
+      "starting",
+      "queued",
+    ]);
+    assert.equal(
+      saved.messages.find((message) => message.id === edited.userMessageId)?.text,
+      "edited and saved",
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("saving an edit after a provider failure leaves the queue held", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:edit-hold-after-failure");
+    yield* createWatchingThread(threadId, 42);
+    yield* send(threadId, "active", "start_immediately");
+    yield* send(threadId, "edited", "queue_after_active");
+    yield* holdForEdit(threadId, 1, "edit-after-failure:hold", true);
+    const [active, edited] = (yield* orchestrator.getThreadProjection(threadId)).runs;
+    const now = yield* DateTime.now;
+    yield* projections.apply({
+      id: EventId.make("event:edit-after-failure:error"),
+      type: "turn-item.updated",
+      threadId,
+      runId: active!.id,
+      nodeId: active!.rootNodeId!,
+      occurredAt: now,
+      payload: {
+        id: TurnItemId.make("turn-item:edit-after-failure:error"),
+        type: "error",
+        threadId,
+        runId: active!.id,
+        nodeId: active!.rootNodeId,
+        providerThreadId: active!.providerThreadId,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 2,
+        status: "failed",
+        title: "Provider failure",
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        failure: {
+          class: "provider_error",
+          message: "Provider request failed with HTTP 502",
+          code: null,
+          retryable: null,
+        },
+      },
+    });
+    yield* projections.apply({
+      id: EventId.make("event:edit-after-failure:failed"),
+      type: "run.updated",
+      threadId,
+      runId: active!.id,
+      occurredAt: now,
+      payload: { ...active!, status: "failed", startedAt: now, completedAt: now },
+    });
+
+    yield* orchestrator.dispatch({
+      type: "queued-run.edit",
+      commandId: CommandId.make("edit-after-failure:save"),
+      threadId,
+      runId: edited!.id,
+      text: "edited after the failure",
+    });
+    assert.deepEqual((yield* threadState(threadId)).runs, ["failed", "queued:held"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each(["expires", "is released"] as const)(
+  "an edit hold starts the queue when it %s",
+  (ending) =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make(`thread:edit-hold-${ending.replaceAll(" ", "-")}`);
+      const sql = yield* SqlClient.SqlClient;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const fireDueHoldTimer = Effect.gen(function* () {
+        yield* sql`DELETE FROM orchestration_v2_effect_outbox WHERE effect_type != 'queued-run.hold.expire'`;
+        yield* worker.drain(1);
+      });
+      yield* createWatchingThread(threadId, 41);
+      yield* send(threadId, "active", "start_immediately");
+      yield* send(threadId, "edited", "queue_after_active");
+      yield* holdForEdit(threadId, 1, `${threadId}:hold`, true);
+      yield* completeRun(threadId, 0);
+
+      const halfHold = Duration.millis(QUEUED_RUN_EDIT_HOLD_MS / 2);
+      yield* TestClock.adjust(halfHold);
+      yield* holdForEdit(threadId, 1, `${threadId}:renew`, true);
+      yield* TestClock.adjust(halfHold);
+      yield* fireDueHoldTimer;
+      assert.deepEqual((yield* threadState(threadId)).runs, ["completed", "queued:editing"]);
+
+      if (ending === "is released") {
+        yield* holdForEdit(threadId, 1, `${threadId}:release`, false);
+        assert.deepEqual((yield* threadState(threadId)).runs, ["completed", "starting"]);
+      }
+      yield* TestClock.adjust(halfHold);
+      yield* fireDueHoldTimer;
+      assert.deepEqual((yield* threadState(threadId)).runs, ["completed", "starting"]);
+      const timers = yield* sql<{ readonly status: string }>`
+        SELECT status FROM orchestration_v2_effect_outbox
+        WHERE effect_type = 'queued-run.hold.expire' ORDER BY available_at`;
+      assert.deepEqual(
+        timers.map((timer) => timer.status),
+        ["succeeded", "succeeded"],
+      );
+    }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect(

@@ -804,6 +804,8 @@ export const OrchestrationV2Run = Schema.Struct({
   queuePosition: Schema.optional(Schema.NullOr(PositiveInt)),
   queueHeld: Schema.optional(Schema.Boolean),
   steerWhenReadyRunId: Schema.optional(RunId),
+  /** A client is editing this message: the queue waits here once it is next, until this time. */
+  editHeldUntil: Schema.optional(Schema.DateTimeUtc),
   requestedAt: Schema.DateTimeUtc,
   startedAt: Schema.NullOr(Schema.DateTimeUtc),
   completedAt: Schema.NullOr(Schema.DateTimeUtc),
@@ -2618,6 +2620,7 @@ export const OrchestrationV2RunJson = OrchestrationV2Run.mapFields((fields) => (
   startedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   completedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   workStartedAt: Schema.optional(Schema.DateTimeUtcFromString),
+  editHeldUntil: Schema.optional(Schema.DateTimeUtcFromString),
 }));
 export type OrchestrationV2RunJson = typeof OrchestrationV2RunJson.Type;
 
@@ -3665,6 +3668,14 @@ export const OrchestrationV2Command = Schema.Union([
     // Replaces all attachments; absent preserves them for older clients editing text.
     attachments: Schema.optional(Schema.Array(ChatAttachment)),
   }),
+  /** Starts or renews (`held: true`) or ends an edit hold; it lapses after QUEUED_RUN_EDIT_HOLD_MS. */
+  Schema.Struct({
+    type: Schema.Literal("queued-run.hold"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: RunId,
+    held: Schema.Boolean,
+  }),
   Schema.Struct({
     type: Schema.Literal("runtime-request.respond"),
     commandId: CommandId,
@@ -3765,8 +3776,19 @@ export const OrchestrationV2Command = Schema.Union([
 ]);
 export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
 
+// Clients renew well inside the hold, since a hidden browser tab may run its timers only once a minute.
+export const QUEUED_RUN_EDIT_HOLD_MS = 2 * 60_000;
+export const QUEUED_RUN_EDIT_HOLD_RENEW_MS = 30_000;
+
 // Excluded from dispatchCommand so only the server can send these.
 const OrchestrationV2InternalCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("queued-run.hold.expire"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: RunId,
+    heldUntil: Schema.DateTimeUtc,
+  }),
   // The server issues this after checking the value against the run's declared schema.
   Schema.Struct({
     type: Schema.Literal("run.output.submit"),

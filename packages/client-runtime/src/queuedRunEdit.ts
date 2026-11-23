@@ -1,3 +1,4 @@
+// @effect-diagnostics globalTimers:off - The edit store renews its hold from plain client state, outside an Effect runtime.
 import { mFallback, msg } from "gt-i18n";
 import type { MFunctionType } from "gt-i18n/types";
 /**
@@ -6,7 +7,7 @@ import type { MFunctionType } from "gt-i18n/types";
  * once, when the projection reports it, wherever the user is in the app. It also
  * owns the edit's save, because a save outlives the view that started it.
  */
-import type { RunId } from "@t3tools/contracts";
+import { QUEUED_RUN_EDIT_HOLD_RENEW_MS, type RunId } from "@t3tools/contracts";
 import { Atom, type AtomRegistry } from "effect/reactivity";
 
 export interface QueuedRunStatus {
@@ -79,11 +80,16 @@ export function queuedRunEditBlockedReason(
     : null;
 }
 
+/** Failures are ignored: an older server, or a run that already started, leaves the edit unheld. */
+export type HoldQueuedRun = (held: boolean) => void;
+
 interface ExitWatch<E> {
   readonly runs: QueuedRunsAtom;
   readonly runId: RunId;
   readonly onRunLeftQueue: (threadKey: string, edit: E) => void;
+  readonly hold: HoldQueuedRun;
   cancel: (() => void) | null;
+  renew: ReturnType<typeof setInterval> | null;
 }
 
 /**
@@ -133,12 +139,17 @@ export function makeQueuedRunEditStore<E extends { readonly runId: RunId }>(opti
     registry.set(atom, { ...current, [threadKey]: edit });
   };
 
+  // Renewal pauses with the watch: one sent during a save would land after it and hold the saved message again.
   const unsubscribe = (watch: ExitWatch<E>) => {
     watch.cancel?.();
     watch.cancel = null;
+    if (watch.renew !== null) clearInterval(watch.renew);
+    watch.renew = null;
   };
 
   const subscribe = (threadKey: string, watch: ExitWatch<E>) => {
+    watch.hold(true);
+    watch.renew = setInterval(() => watch.hold(true), QUEUED_RUN_EDIT_HOLD_RENEW_MS);
     const check = (runs: ReadonlyArray<QueuedRunStatus> | null) => {
       if (watches.get(threadKey) !== watch || watch.cancel === null) return;
       if (!runLeftQueue(runs, watch.runId)) return;
@@ -153,11 +164,13 @@ export function makeQueuedRunEditStore<E extends { readonly runId: RunId }>(opti
     check(registry.get(watch.runs));
   };
 
-  const stopWatch = (threadKey: string) => {
+  // The server drops the hold itself once the run starts or a save lands, so only an abandoned edit releases it.
+  const stopWatch = (threadKey: string, release: boolean) => {
     const watch = watches.get(threadKey);
     if (watch === undefined) return;
     unsubscribe(watch);
     watches.delete(threadKey);
+    if (release) watch.hold(false);
   };
 
   return {
@@ -166,9 +179,10 @@ export function makeQueuedRunEditStore<E extends { readonly runId: RunId }>(opti
     savingAtom,
     get,
     /**
-     * Starts an edit, replacing any edit already open on the thread. When the
-     * run leaves the queue the edit is removed and `onRunLeftQueue` receives
-     * it; if the run already left, that happens immediately.
+     * Starts an edit, replacing any edit already open on the thread. The queue
+     * is held at the run until the edit ends. When the run leaves the queue the
+     * edit is removed and `onRunLeftQueue` receives it; if the run already
+     * left, that happens immediately.
      */
     begin(
       threadKey: string,
@@ -176,11 +190,12 @@ export function makeQueuedRunEditStore<E extends { readonly runId: RunId }>(opti
       watch: {
         readonly runs: QueuedRunsAtom;
         readonly onRunLeftQueue: (threadKey: string, edit: E) => void;
+        readonly hold: HoldQueuedRun;
       },
     ) {
-      stopWatch(threadKey);
+      stopWatch(threadKey, watches.get(threadKey)?.runId !== edit.runId);
       write(threadKey, edit);
-      const next: ExitWatch<E> = { ...watch, runId: edit.runId, cancel: null };
+      const next: ExitWatch<E> = { ...watch, runId: edit.runId, cancel: null, renew: null };
       watches.set(threadKey, next);
       subscribe(threadKey, next);
     },
@@ -189,7 +204,7 @@ export function makeQueuedRunEditStore<E extends { readonly runId: RunId }>(opti
       if (edit !== null) write(threadKey, f(edit));
     },
     end(threadKey: string) {
-      stopWatch(threadKey);
+      stopWatch(threadKey, true);
       write(threadKey, null);
     },
     /**
@@ -211,7 +226,7 @@ export function makeQueuedRunEditStore<E extends { readonly runId: RunId }>(opti
         }
         if (watches.get(threadKey) !== watch) return false;
         if (succeeded) {
-          stopWatch(threadKey);
+          stopWatch(threadKey, false);
           write(threadKey, null);
           return true;
         }

@@ -713,6 +713,26 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
+          case "queued-run.hold.expire":
+            return threads
+              .dispatch({
+                type: "queued-run.hold.expire",
+                commandId: CommandId.make(`${effect.id}:expire`),
+                threadId: effect.threadId,
+                runId: effect.request.runId,
+                heldUntil: effect.request.heldUntil,
+              })
+              .pipe(
+                Effect.asVoid,
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
         }
       }),
     });

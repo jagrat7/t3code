@@ -224,6 +224,10 @@ export function useQueuedRunEdit(input: {
   } = input;
   const editQueuedRunCommand = useEditQueuedRunCommand();
   const promoteQueuedRun = useAtomCommand(threadEnvironment.promoteQueuedRun);
+  const holdQueuedRun = useAtomCommand(threadEnvironment.holdQueuedRun, {
+    reportFailure: false,
+    reportDefect: false,
+  });
   const editKey = scopedThreadKey(routeThreadRef);
   const storedEdit = useAtomValue(queuedRunEdits.atom)[editKey] ?? null;
   const editing = activeThreadId === null ? null : storedEdit;
@@ -294,6 +298,12 @@ export function useQueuedRunEdit(input: {
         context,
       },
       {
+        hold: (held) => {
+          void holdQueuedRun({
+            environmentId,
+            input: { threadId: activeThreadId, runId: request.runId, held },
+          });
+        },
         runs: makeQueuedRunsAtom({
           threadId: activeThreadId,
           snapshot: threadEnvironment.snapshotAtom(environmentId),

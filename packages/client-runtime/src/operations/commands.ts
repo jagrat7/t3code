@@ -276,6 +276,11 @@ export interface CancelQueuedRunInput extends ThreadCommandInput {
   readonly runId: RunId;
 }
 
+export interface HoldQueuedRunInput extends ThreadCommandInput {
+  readonly runId: RunId;
+  readonly held: boolean;
+}
+
 export interface RetryWorkspacePreparationInput extends ThreadCommandInput {
   readonly runId: RunId;
 }
@@ -1185,6 +1190,18 @@ export const cancelQueuedRun = Effect.fn("EnvironmentCommands.cancelQueuedRun")(
     commandId: yield* allocateCommandId(input),
     threadId: input.threadId,
     runId: input.runId,
+  });
+});
+
+export const holdQueuedRun = Effect.fn("EnvironmentCommands.holdQueuedRun")(function* (
+  input: HoldQueuedRunInput,
+) {
+  return yield* dispatch({
+    type: "queued-run.hold",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    runId: input.runId,
+    held: input.held,
   });
 });
 

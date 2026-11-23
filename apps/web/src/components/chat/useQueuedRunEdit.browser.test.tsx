@@ -42,6 +42,8 @@ const mocks = await vi.hoisted(async () => {
     editQueuedRun: vi.fn<(value: unknown) => Promise<{ readonly _tag: "Success" | "Failure" }>>(),
     promoteQueuedRun: vi.fn<(value: unknown) => Promise<{ readonly _tag: "Success" }>>(),
     promoteCommand: {},
+    holdQueuedRun: vi.fn<(value: unknown) => Promise<{ readonly _tag: "Success" }>>(),
+    holdCommand: {},
     // The projection's runs per thread, written by each test to stand in for the server.
     threadRuns: Atom.family((_key: string) =>
       Atom.make<ReadonlyArray<RunStatus> | null>(null).pipe(Atom.keepAlive),
@@ -51,7 +53,10 @@ const mocks = await vi.hoisted(async () => {
 
 vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: (command: unknown) =>
-    command === mocks.promoteCommand ? mocks.promoteQueuedRun : mocks.editQueuedRun,
+    new Map<unknown, unknown>([
+      [mocks.promoteCommand, mocks.promoteQueuedRun],
+      [mocks.holdCommand, mocks.holdQueuedRun],
+    ]).get(command) ?? mocks.editQueuedRun,
 }));
 
 vi.mock("../../hooks/useSettings", () => ({
@@ -68,6 +73,7 @@ vi.mock("../../state/threads", async () => {
       snapshotAtom: () => Atom.make(null),
       editQueuedRun: {},
       promoteQueuedRun: mocks.promoteCommand,
+      holdQueuedRun: mocks.holdCommand,
     },
     environmentThreadDetails: {
       statusAtom: () => Atom.make("ready"),
@@ -178,6 +184,8 @@ function view(
 function setup() {
   mocks.editQueuedRun.mockReset();
   mocks.promoteQueuedRun.mockReset();
+  mocks.holdQueuedRun.mockReset();
+  mocks.holdQueuedRun.mockResolvedValue({ _tag: "Success" });
   useAttachmentUploadStore.setState({ uploadsByImageId: {} });
   useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
   setRuns(THREAD_A, "queued");

@@ -27,6 +27,7 @@ import {
   closeGuestShare,
   resolveGuestMessage,
   cancelQueuedRun,
+  holdQueuedRun,
   createThread,
   deleteThread,
   editQueuedRun,
@@ -435,6 +436,12 @@ export function createThreadEnvironmentAtoms<R, E>(
     cancelQueuedRun: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:cancel-queued-run",
       execute: cancelQueuedRun,
+      scheduler,
+      concurrency,
+    }),
+    holdQueuedRun: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:hold-queued-run",
+      execute: holdQueuedRun,
       scheduler,
       concurrency,
     }),
