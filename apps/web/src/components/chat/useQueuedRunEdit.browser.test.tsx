@@ -53,11 +53,10 @@ const mocks = await vi.hoisted(async () => {
 
 vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: (command: unknown) =>
-    command === mocks.promoteCommand
-      ? mocks.promoteQueuedRun
-      : command === mocks.holdCommand
-        ? mocks.holdQueuedRun
-        : mocks.editQueuedRun,
+    new Map<unknown, unknown>([
+      [mocks.promoteCommand, mocks.promoteQueuedRun],
+      [mocks.holdCommand, mocks.holdQueuedRun],
+    ]).get(command) ?? mocks.editQueuedRun,
 }));
 
 vi.mock("../../hooks/useSettings", () => ({
